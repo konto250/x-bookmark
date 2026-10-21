@@ -12,7 +12,7 @@ if(env.OPENAI_API_KEY && process.argv.includes('--llm')) {
   const auth=await fetch(base+'/api/analyze',{method:'POST',headers,body:JSON.stringify({action:'authenticate',accessCode:env.APP_ACCESS_TOKEN})});
   assert.equal(auth.status,200,'アプリの認証が成功すること');
   const cookie=auth.headers.get('set-cookie')?.split(';')[0];assert.ok(cookie);
-  const response=await fetch(base+'/api/analyze',{method:'POST',headers:{...headers,Cookie:cookie},body:JSON.stringify({url:'https://x.com/test/status/1234567890',text:'TypeScriptを学ぶための公式ドキュメント。 https://www.typescriptlang.org/docs/',links:['https://www.typescriptlang.org/docs/'],existingTags:['開発','学習']})});
+  const response=await fetch(base+'/api/analyze',{method:'POST',headers:{...headers,Cookie:cookie},body:JSON.stringify({url:'https://x.com/test/status/1234567890',text:'TypeScriptを学ぶための公式ドキュメント。 #TypeScript #学習 https://www.typescriptlang.org/docs/',links:['https://www.typescriptlang.org/docs/'],existingTags:['開発','学習']})});
   const result=await response.json();assert.equal(response.status,200,JSON.stringify(result));
-  assert.ok(result.tags.length);assert.ok(result.pages.some(p=>p.status==='ok'),'リンク先の実際の取得成功');console.log(JSON.stringify({authentication:'成功',llm:'成功',...result}));
+  assert.ok(result.tags.length);assert.ok(!result.tags.includes('TypeScript') && !result.tags.includes('学習'),'AIが本文ハッシュタグ以外の補足タグを返すこと');assert.ok(result.pages.some(p=>p.status==='ok'),'リンク先の実際の取得成功');console.log(JSON.stringify({authentication:'成功',llm:'成功',...result}));
 } else console.log('OpenAI実通信: 未実行（キー未設定、または--llm指定なし）');

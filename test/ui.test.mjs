@@ -55,3 +55,26 @@ test('取り込んだHTMLは文字として表示し、実行可能な要素を�
 });
 test('削除したポストは保存データからも消える',async()=>{const a=await app({posts:[post(1,'テスト',['テスト'])]});try {a.click('[data-delete="1"]');assert.equal(model.readPosts(a.w.localStorage).length,0);assert.match(a.$('#collection').textContent,/最初の1件/);}finally{a.dom.window.close();}});
 test('提案待ちで画面を閉じても、別の下書きを変更しない',async()=>{let resolve;const pending=new Promise(r=>resolve=r);const a=await app({capture:{url:'https://x.com/test/status/123',text:'古い本文'},configured:true,analyze:()=>pending});try {a.$('#editor').close();a.click('[data-action="add"]');a.fill('#post-text','新しい本文');resolve({ok:true,json:async()=>({tags:['古い提案'],pages:[]})});await tick();assert.equal(a.$('#post-text').value,'新しい本文');assert.doesNotMatch(a.$('#draft-tags').textContent,/古い提案/);}finally{a.dom.window.close();}});
+
+test('本文ハッシュタグにAIタグを追加し、同名タグは重複させず保存する',async()=>{
+  const a=await app({capture:{url:'https://x.com/test/status/123',text:'Webアプリを作ろう #React ＃開発 #React'},configured:true,analyze:async()=>({ok:true,json:async()=>({tags:['React','学習'],pages:[]})})});
+  try {await tick();assert.deepEqual([...a.w.document.querySelectorAll('[data-remove-tag]')].map(el=>el.dataset.removeTag),['React','開発','学習']);a.submit();assert.deepEqual(model.readPosts(a.w.localStorage)[0].tags,['React','開発','学習']);}finally{a.dom.window.close();}
+});
+test('AIに失敗しても本文のハッシュタグは取り込んで保存する',async()=>{
+  const a=await app({capture:{url:'https://x.com/test/status/123',text:'写真です #写真 #風景'},configured:true,analyze:async()=>({ok:false,json:async()=>({error:'AI接続エラー'})})});
+  try {await tick();assert.ok(a.$('[data-remove-tag="写真"]'));a.submit();assert.deepEqual(model.readPosts(a.w.localStorage)[0].tags,['写真','風景']);}finally{a.dom.window.close();}
+});
+test('手入力した本文のハッシュタグを保存し、外したタグは再編集でも復活させない',async()=>{
+  const a=await app();try {
+    a.click('[data-action="add"]');a.fill('#post-url','https://x.com/test/status/123');a.fill('#post-text','勉強中 #Re');a.fill('#post-text','勉強中 #React #学習');a.$('#post-text').dispatchEvent(new a.w.Event('change',{bubbles:true}));
+    assert.equal(a.$('[data-remove-tag="Re"]'),null);a.click('[data-remove-tag="学習"]');a.submit();
+    assert.deepEqual(model.readPosts(a.w.localStorage)[0].tags,['React']);
+    a.click('[data-edit="123"]');assert.equal(a.$('[data-remove-tag="学習"]'),null);a.submit();assert.deepEqual(model.readPosts(a.w.localStorage)[0].tags,['React']);
+    a.click('[data-edit="123"]');a.fill('#tag-input','学習');a.click('#add-tag');a.submit();assert.deepEqual(model.readPosts(a.w.localStorage)[0].tags,['React','学習']);
+  }finally{a.dom.window.close();}
+});
+test('提案待ちに外したハッシュタグはAI応答でも保存時にも復活させない',async()=>{
+  let resolve;const pending=new Promise(r=>resolve=r);
+  const a=await app({capture:{url:'https://x.com/test/status/123',text:'制作中 #React #開発'},configured:true,analyze:()=>pending});
+  try {a.click('[data-remove-tag="React"]');resolve({ok:true,json:async()=>({tags:['React','ツール'],pages:[]})});await tick();a.submit();assert.deepEqual(model.readPosts(a.w.localStorage)[0].tags,['開発','ツール']);}finally{a.dom.window.close();}
+});

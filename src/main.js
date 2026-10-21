@@ -1,5 +1,5 @@
 import './style.css';
-import { STORAGE_KEY, DRAFT_KEY, normalizePost, normalizeTags, readPosts, upsertPosts } from './model.js';
+import { STORAGE_KEY, DRAFT_KEY, normalizePost, normalizeTags, extractHashtags, readPosts, upsertPosts } from './model.js';
 import { buildBookmarklet } from './bookmarklet.js';
 
 const icons = {
@@ -54,7 +54,7 @@ function renderShell() {
     <dialog id="editor" aria-labelledby="editor-title"><form id="editor-form"><div class="dialog-header"><div><div class="eyebrow">SAVE A LITTLE INSPIRATION</div><h2 id="editor-title">ポストを保存</h2></div><button type="button" class="icon-button" data-close="editor" aria-label="閉じる">${icon('close')}</button></div>
       <div class="dialog-body"><label class="field">ポストのURL<input id="post-url" type="url" required placeholder="https://x.com/username/status/…" /></label><label class="field">投稿者<input id="post-author" maxlength="160" placeholder="名前・@ユーザー名（任意）" /></label><label class="field">ポストの本文<textarea id="post-text" rows="5" maxlength="30000" placeholder="ポストの本文を入力。ブックマークレットを使うと自動で取り込めます。"></textarea></label>
       <div class="ai-panel"><div class="section-heading"><span>${icon('spark')}AIでタグを提案</span><button id="analyze" type="button" class="small-button">内容を解析する</button></div><p class="fineprint">本文・本文中のリンク先（最大5件）・既存タグをOpenAIへ送って分類します。</p><p id="analysis-status" class="analysis-status" role="status" aria-live="polite"></p><div id="pages"></div></div>
-      <div class="field"><span>タグ <small>クリックで外せます</small></span><div id="draft-tags" class="tag-list"></div><div class="tag-input-row"><input id="tag-input" maxlength="40" placeholder="タグを自由に追加" aria-label="追加するタグ" /><button type="button" id="add-tag" class="secondary">${icon('plus')}追加</button></div></div><p id="editor-error" class="error-message" role="alert"></p></div>
+      <div class="field"><span>タグ <small>本文のハッシュタグ＋AI提案・クリックで外せます</small></span><div id="draft-tags" class="tag-list"></div><div class="tag-input-row"><input id="tag-input" maxlength="40" placeholder="タグを自由に追加" aria-label="追加するタグ" /><button type="button" id="add-tag" class="secondary">${icon('plus')}追加</button></div></div><p id="editor-error" class="error-message" role="alert"></p></div>
       <div class="dialog-footer"><span>${icon('lock')} このブラウザーに保存されます</span><button type="submit" id="save-post" class="primary">${icon('bookmark')}保存する</button></div></form></dialog>
     <dialog id="setup" aria-labelledby="setup-title"><div class="dialog-header"><div><div class="eyebrow">SMALL SETUP, BIG COLLECTION</div><h2 id="setup-title">保存を、もっと手軽に。</h2></div><button class="icon-button" data-close="setup" aria-label="閉じる">${icon('close')}</button></div><div class="dialog-body">
       <p class="intro">次のボタンをブラウザーの<strong>ブックマークバーへドラッグ</strong>してください。</p><div class="bookmarklet-zone"><a id="bookmarklet" class="bookmarklet" draggable="true">${icon('bookmark')}ポストノートに保存</a><span>↑ ブックマークバーへドラッグ</span></div>
@@ -74,6 +74,7 @@ function renderShell() {
   $('#tag-input').addEventListener('keydown', event=>{if(event.key === 'Enter'){event.preventDefault(); addTag();}});
   $('#editor-form').addEventListener('submit', saveDraft);
   for (const id of ['post-url','post-author','post-text']) $(`#${id}`).addEventListener('input', persistDraft);
+  $('#post-text').addEventListener('change', () => {syncDraft(); applyHashtags(); persistDraft();});
   $('#settings-form').addEventListener('submit', saveSettings);
   $('#import-file').addEventListener('change', importBackup);
   $('#editor').addEventListener('close',()=>{controller?.abort(); analyzing = false; draft = null;});
@@ -116,17 +117,22 @@ function renderCollection() {
 function renderAll() {renderNavigation(); renderCollection();}
 
 function openEditor(input = {}, edit = false) {
-  controller?.abort(); analyzing = false; excludedTags = new Set();
+  controller?.abort(); analyzing = false; excludedTags = new Set(normalizeTags(input.excludedTags));
   draft = {url:'',text:'',author:'',links:[],tags:[],pages:[],...input};
   $('#editor-title').textContent = edit ? 'ブックマークを編集' : 'ポストを保存';
   $('#post-url').value = draft.url; $('#post-url').readOnly = edit;
   $('#post-author').value = draft.author; $('#post-text').value = draft.text;
   $('#analysis-status').textContent = ''; $('#editor-error').textContent = '';
-  $('#tag-input').value = ''; setAnalyzing(false); renderDraftTags(); renderPages();
+  $('#tag-input').value = ''; setAnalyzing(false); applyHashtags(); renderPages();
   if (!$('#editor').open) $('#editor').showModal();
   persistDraft();
 }
-function syncDraft() {if(draft) Object.assign(draft,{url:$('#post-url').value.trim(),author:$('#post-author').value.trim(),text:$('#post-text').value});}
+function syncDraft() {if(draft) Object.assign(draft,{url:$('#post-url').value.trim(),author:$('#post-author').value.trim(),text:$('#post-text').value,excludedTags:[...excludedTags]});}
+function applyHashtags() {
+  if(!draft) return;
+  draft.tags = normalizeTags([...extractHashtags(draft.text).filter(tag=>!excludedTags.has(tag)),...draft.tags]);
+  renderDraftTags();
+}
 function persistDraft() {syncDraft(); try {if(draft) sessionStorage.setItem(DRAFT_KEY,JSON.stringify(draft));} catch {}}
 function renderDraftTags() {$('#draft-tags').innerHTML = draft.tags.map(t=>tagChip(t,true)).join('') || '<span class="no-tag">AIの提案を使うか、好きなタグを追加してください。</span>';}
 function renderPages() {$('#pages').innerHTML = draft.pages.map(p=>`<div class="page-result ${p.status === 'ok' ? '' : 'failed'}">${icon(p.status === 'ok' ? 'check' : 'link')}<div><a href="${esc(p.url)}" target="_blank" rel="noopener noreferrer">${esc(p.title || new URL(p.url).hostname)}</a><small>${p.status === 'ok' ? 'リンク先の内容を取得済み' : esc(p.error || '取得できませんでした。')}</small></div></div>`).join('');}
@@ -134,7 +140,7 @@ function addTag() {const value = $('#tag-input').value; if(!value.trim()) return
 function setAnalyzing(value) {analyzing = value; $('#analyze').disabled = value; $('#analyze').textContent = value ? '解析中…' : '内容を解析する'; $('#save-post').disabled = value;}
 async function analyzeDraft() {
   if (analyzing || !draft) return;
-  syncDraft(); let post;
+  syncDraft(); applyHashtags(); let post;
   try {post = normalizePost(draft);} catch (error) {$('#editor-error').textContent = error.message; return;}
   $('#editor-error').textContent = ''; $('#analysis-status').textContent = '本文とリンク先を確認して、AIがタグを考えています…';
   setAnalyzing(true); controller = new AbortController(); const active = draft;
@@ -152,7 +158,7 @@ async function analyzeDraft() {
 }
 function saveDraft(event) {
   event.preventDefault(); if(analyzing) return;
-  syncDraft(); if($('#tag-input').value.trim()) addTag();
+  syncDraft(); applyHashtags(); if($('#tag-input').value.trim()) addTag();
   try {
     const post = normalizePost({...draft,updatedAt:Date.now()});
     state.posts = upsertPosts([post]);
@@ -218,7 +224,7 @@ async function receiveCapture() {
     if(raw.length > 400000) throw new Error('ポストが大きすぎます。');
     const incoming = normalizePost(JSON.parse(decodeURIComponent(raw)));
     const old = state.posts.find(p=>p.id===incoming.id);
-    openEditor({...incoming,tags:old?.tags || [],createdAt:old?.createdAt || incoming.createdAt},Boolean(old));
+    openEditor({...incoming,tags:old?.tags || [],excludedTags:old?.excludedTags || [],createdAt:old?.createdAt || incoming.createdAt},Boolean(old));
     await configPromise;
     if(draft && state.config?.configured && hasSession()) analyzeDraft();
     else if(draft) {$('#analysis-status').textContent = 'AIタグ提案を使うには「AI設定」でアクセスコードを入力してください。';$('#analysis-status').append(Object.assign(document.createElement('button'),{textContent:'AI設定を開く',className:'text-button',onclick:openSettings}));}
