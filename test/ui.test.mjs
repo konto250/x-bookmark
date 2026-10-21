@@ -14,8 +14,8 @@ import { createSavedPostAnalyzer } from '../src/retag-analysis.js';
 
 const source=readFileSync(new URL('../src/main.js',import.meta.url),'utf8').replace(/^import .*;\r?\n/gm,'');
 const tick=()=>new Promise(resolve=>setTimeout(resolve,10));
-async function app({posts=[],capture,configured=false,analyze,cache,authenticated=true}={}) {
-  const url='https://postnote.test/'+(capture?'#capture='+encodeURIComponent(JSON.stringify(capture)):'');
+async function app({posts=[],capture,configured=false,analyze,cache,authenticated=true,search=''}={}) {
+  const url='https://postnote.test/'+search+(capture?'#capture='+encodeURIComponent(JSON.stringify(capture)):'');
   const dom=new JSDOM('<div id="app"></div><div id="toast"></div>',{url,runScripts:'outside-only',pretendToBeVisual:true});
   const w=dom.window;
   Object.assign(w,model,{readPosts:()=>model.readPosts(w.localStorage),upsertPosts:incoming=>model.upsertPosts(incoming,w.localStorage),buildBookmarklet});
@@ -37,6 +37,11 @@ async function app({posts=[],capture,configured=false,analyze,cache,authenticate
   return {dom,w,$,click,fill,submit};
 }
 const post=(id,text,tags)=>model.normalizePost({url:`https://x.com/test/status/${id}`,text,tags,author:'テスト\n@test'});
+
+test('ログイン復帰用の印だけを消し、取り込み本文と他のURLパラメーターを保持する',async()=>{
+  const a=await app({search:'?view=all&_postnote_auth=1',capture:{url:'https://x.com/test/status/1',text:'ログイン後の本文 #開発'}});
+  try {assert.equal(a.w.location.search,'?view=all');assert.equal(a.w.location.hash,'');assert.equal(a.$('#editor').open,true);assert.equal(a.$('#post-text').value,'ログイン後の本文 #開発');}finally{a.dom.window.close();}
+});
 
 test('一覧からAI付け直しを開き、確認後の適用・元に戻すとキャッシュ再利用が連携する',async()=>{
   let calls=0;const original=post(1,'React #開発',['旧分類']);

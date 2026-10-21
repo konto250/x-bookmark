@@ -310,6 +310,8 @@ async function logout() {
   } catch {toast('ログアウトできませんでした。通信状態を確認して再試行してください。');}
 }
 async function startApp() {
+  const url=new URL(location.href);
+  if(url.searchParams.has('_postnote_auth')) {url.searchParams.delete('_postnote_auth');history.replaceState(null,'',url.pathname+url.search+url.hash);}
   if(!await checkSession()) return;
   loadPosts();renderShell();renderAll();configPromise=loadConfig();
   receiveCapture();

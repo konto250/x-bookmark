@@ -20,6 +20,12 @@ if(process.argv.includes('--local-build')) {
   const builtHtml=readFileSync('dist/index.html','utf8');
   assert.ok(builtHtml.includes(asset),'公開アセットが検証済みのローカルビルドと一致すること');
   assert.equal(await assetResponse.text(),readFileSync('dist'+asset,'utf8'),'公開JavaScriptの内容が検証済みのローカルビルドと一致すること');
+  const loginScript=await fetch(base+'/login.js');assert.equal(loginScript.status,200);
+  assert.equal(await loginScript.text(),readFileSync('public/login.js','utf8'),'公開ログイン処理が修正版と一致すること');
+  const returnUrl=base+'?_postnote_auth=1';
+  assert.match(await (await fetch(returnUrl)).text(),/id="login-form"/,'復帰用パラメーターだけでは認証を迂回できないこと');
+  const returned=await fetch(returnUrl,{headers:authorizedHeaders});assert.equal(returned.status,200);
+  assert.ok((await returned.text()).includes(asset),'認証済みの復帰先でアプリ本体を配信すること');
   console.log('公開JavaScript: ローカルビルドとの完全一致を確認');
 }
 assert.equal((await fetch(base+asset)).status,401,'認証済みアセットが匿名アクセスへキャッシュ配信されないこと');

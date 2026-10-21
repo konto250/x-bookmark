@@ -56,21 +56,41 @@ test('正しい署名だけがゲートを通り、改ざん・期限切れ・�
   const allowed=proxy(new Request(url,{headers:{cookie}}));assert.equal(allowed.headers.get('x-middleware-next'),'1');assert.match(allowed.headers.get('cache-control'),/no-store/);
 });
 test('ログインフォームはパスワードを保存せず、取り込みURLを保持して画面を再取得する',async()=>{
-  const dom=new JSDOM(LOGIN_HTML,{url:'https://app.example/#capture=sample'});let body,reloaded=false;
+  const dom=new JSDOM(LOGIN_HTML,{url:'https://app.example/#capture=sample'});let body,destination;
   try {
-    const location={hash:'#capture=sample',reload(){reloaded=true;}};
-    vm.runInNewContext(readFileSync('public/login.js','utf8'),{document:dom.window.document,location,fetch:async(_url,init)=>{if(!init.body)return {ok:true,json:async()=>({authenticated:false})};body=JSON.parse(init.body);return {ok:true,json:async()=>({authenticated:true})};}});
+    const location={href:'https://app.example/?view=all#capture=sample',replace(url){destination=new URL(url);},reload(){assert.fail('外部からの遷移をreloadしない');}};
+    vm.runInNewContext(readFileSync('public/login.js','utf8'),{URL,document:dom.window.document,location,fetch:async(_url,init)=>{if(!init.body)return {ok:true,json:async()=>({authenticated:false})};body=JSON.parse(init.body);return {ok:true,json:async()=>({authenticated:true})};}});
     dom.window.document.querySelector('#password').value=secret;
     dom.window.document.querySelector('#login-form').dispatchEvent(new dom.window.Event('submit',{cancelable:true}));
     await new Promise(resolve=>setTimeout(resolve,0));
-    assert.equal(body.password,secret);assert.equal(dom.window.document.querySelector('#password').value,'');assert.equal(reloaded,true);assert.equal(location.hash,'#capture=sample');
+    assert.equal(body.password,secret);assert.equal(dom.window.document.querySelector('#password').value,'');assert.equal(destination.origin,'https://app.example');assert.equal(destination.hash,'#capture=sample');assert.equal(destination.searchParams.get('view'),'all');assert.equal(destination.searchParams.get('_postnote_auth'),'1');
     assert.equal(dom.window.localStorage.length,0);assert.equal(dom.window.sessionStorage.length,0);
   }finally{dom.window.close();}
 });
 test('Xから開いた際も有効なセッションがあればパスワードの再入力なしで進む',async()=>{
-  const dom=new JSDOM(LOGIN_HTML);let reloads=0,calls=0;
+  const dom=new JSDOM(LOGIN_HTML);let navigations=0,calls=0;
   try {
-    vm.runInNewContext(readFileSync('public/login.js','utf8'),{document:dom.window.document,location:{reload(){reloads++;}},fetch:async(_url,init)=>{calls++;assert.equal(init.body,undefined);return {ok:true,json:async()=>({authenticated:true})};}});
-    await new Promise(resolve=>setTimeout(resolve,0));assert.equal(calls,1);assert.equal(reloads,1);
+    vm.runInNewContext(readFileSync('public/login.js','utf8'),{URL,document:dom.window.document,location:{href:'https://app.example/#capture=sample',replace(url){navigations++;assert.equal(new URL(url).hash,'#capture=sample');assert.equal(new URL(url).searchParams.get('_postnote_auth'),'1');},reload(){assert.fail('自動再読み込みのループを作らない');}},fetch:async(_url,init)=>{calls++;assert.equal(init.credentials,'same-origin');assert.equal(init.body,undefined);return {ok:true,json:async()=>({authenticated:true})};}});
+    await new Promise(resolve=>setTimeout(resolve,0));assert.equal(calls,1);assert.equal(navigations,1);
   }finally{dom.window.close();}
+});
+
+test('復帰後もログイン画面になった場合は自動遷移を止め、手動ログインで復帰できる',async()=>{
+  const dom=new JSDOM(LOGIN_HTML);let destination;
+  try {
+    vm.runInNewContext(readFileSync('public/login.js','utf8'),{URL,document:dom.window.document,location:{href:'https://app.example/?_postnote_auth=1#capture=sample',replace(url){destination=new URL(url);}},fetch:async()=>({ok:true,json:async()=>({authenticated:true})})});
+    await new Promise(resolve=>setTimeout(resolve,0));assert.equal(destination,undefined);assert.match(dom.window.document.querySelector('#login-error').textContent,/引き継げませんでした/);
+    dom.window.document.querySelector('#password').value=secret;dom.window.document.querySelector('#login-form').dispatchEvent(new dom.window.Event('submit',{cancelable:true}));
+    await new Promise(resolve=>setTimeout(resolve,0));assert.equal(destination.searchParams.get('_postnote_auth'),'2');assert.equal(destination.hash,'#capture=sample');
+  }finally{dom.window.close();}
+});
+
+test('セッションがない場合や確認に失敗した場合は自動遷移しない',async()=>{
+  for(const outcome of ['anonymous','network','unauthorized']) {
+    const dom=new JSDOM(LOGIN_HTML);let navigations=0;
+    try {
+      vm.runInNewContext(readFileSync('public/login.js','utf8'),{URL,document:dom.window.document,location:{href:'https://app.example/#capture=sample',replace(){navigations++;}},fetch:async()=>{if(outcome==='network')throw new Error('通信エラー');return {ok:outcome!=='unauthorized',json:async()=>({authenticated:false})};}});
+      await new Promise(resolve=>setTimeout(resolve,0));assert.equal(navigations,0);assert.equal(dom.window.document.querySelector('#login-button').disabled,false);
+    }finally{dom.window.close();}
+  }
 });
