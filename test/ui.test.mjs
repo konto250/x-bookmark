@@ -9,6 +9,8 @@ import { createAnalysisCache, ANALYSIS_CACHE_KEY } from '../src/analysis-cache.j
 import { DEFAULT_MODEL } from '../src/analysis-config.js';
 import * as backup from '../src/backup.js';
 import * as tagPolicy from '../src/tag-policy.js';
+import { createRetagDialog } from '../src/retag-dialog.js';
+import { createSavedPostAnalyzer } from '../src/retag-analysis.js';
 
 const source=readFileSync(new URL('../src/main.js',import.meta.url),'utf8').replace(/^import .*;\r?\n/gm,'');
 const tick=()=>new Promise(resolve=>setTimeout(resolve,10));
@@ -20,6 +22,7 @@ async function app({posts=[],capture,configured=false,analyze,cache,authenticate
   Object.assign(w,{DEFAULT_MODEL,createAnalysisCache:options=>createAnalysisCache({...options,crypto:webcrypto})});
   Object.assign(w,backup,{restoreBackup:(posts,mode)=>backup.restoreBackup(posts,mode,w.localStorage)});
   Object.assign(w,tagPolicy);
+  Object.assign(w,{createRetagDialog,createSavedPostAnalyzer});
   if(cache) w.localStorage.setItem(ANALYSIS_CACHE_KEY,cache);
   w.HTMLDialogElement.prototype.showModal=function(){this.open=true;};
   w.HTMLDialogElement.prototype.close=function(){this.open=false;this.dispatchEvent(new w.Event('close'));};
@@ -34,6 +37,28 @@ async function app({posts=[],capture,configured=false,analyze,cache,authenticate
   return {dom,w,$,click,fill,submit};
 }
 const post=(id,text,tags)=>model.normalizePost({url:`https://x.com/test/status/${id}`,text,tags,author:'テスト\n@test'});
+
+test('一覧からAI付け直しを開き、確認後の適用・元に戻すとキャッシュ再利用が連携する',async()=>{
+  let calls=0;const original=post(1,'React #開発',['旧分類']);
+  const a=await app({posts:[original],configured:true,analyze:async init=>{calls++;assert.deepEqual(JSON.parse(init.body).existingTags,['旧分類']);return {ok:true,json:async()=>({tags:['新分類'],pages:[]})};}});
+  try {
+    a.click('[data-action="retag"]');assert.equal(calls,0);a.click('#retag-all');a.click('#retag-run');await tick();await tick();
+    assert.deepEqual(model.readPosts(a.w.localStorage),[original]);a.click('#retag-apply');
+    assert.deepEqual(model.readPosts(a.w.localStorage)[0].tags,['開発','新分類']);assert.match(a.$('#navigation').textContent,/新分類/);
+    a.click('[data-action="retag"]');a.click('#retag-undo');assert.deepEqual(model.readPosts(a.w.localStorage),[original]);
+    a.click('[data-action="retag"]');a.click('#retag-all');a.click('#retag-run');await tick();await tick();assert.equal(calls,1);assert.match(a.$('#retag-list').textContent,/キャッシュを再利用/);
+  } finally {a.dom.window.close();}
+});
+
+test('一括解析中の別タブログアウトでリクエストを中止し本文表示を閉じる',async()=>{
+  let resolve,signal;const original=post(1,'秘密の保存本文',['元']);
+  const a=await app({posts:[original],configured:true,analyze:init=>{signal=init.signal;return new Promise(done=>{resolve=done;});}});
+  try {
+    a.click('[data-action="retag"]');a.click('#retag-all');a.click('#retag-run');await tick();await tick();
+    a.w.dispatchEvent(new a.w.StorageEvent('storage',{key:'postnote.logout',newValue:'1'}));assert.equal(signal.aborted,true);assert.equal(a.$('#retag'),null);assert.doesNotMatch(a.$('#app').textContent,/秘密の保存本文/);
+    resolve({ok:true,json:async()=>({tags:['遅い提案'],pages:[]})});await tick();assert.deepEqual(model.readPosts(a.w.localStorage),[original]);
+  } finally {a.dom.window.close();}
+});
 
 test('既存タグを使用頻度順で送り、キャッシュの提案も既存の表記に寄せる',async()=>{
   let calls=0;

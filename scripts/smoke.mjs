@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { loadEnv } from 'vite';
 import { inspectPage } from '../server/pages.js';
 const base=process.argv[2] || 'http://127.0.0.1:5173';
@@ -14,7 +15,13 @@ const cookie=setCookie.split(';')[0];const authorizedHeaders={...headers,Cookie:
 const app=await fetch(base,{headers:authorizedHeaders});assert.equal(app.status,200);const html=await app.text();assert.doesNotMatch(html,/id="login-form"/);
 const asset=html.match(/src="(\/assets\/[^\"]+\.js)"/)?.[1] || '/src/main.js';
 assert.equal((await fetch(base+asset)).status,401);
-assert.equal((await fetch(base+asset,{headers:authorizedHeaders})).status,200);
+const assetResponse=await fetch(base+asset,{headers:authorizedHeaders});assert.equal(assetResponse.status,200);
+if(process.argv.includes('--local-build')) {
+  const builtHtml=readFileSync('dist/index.html','utf8');
+  assert.ok(builtHtml.includes(asset),'公開アセットが検証済みのローカルビルドと一致すること');
+  assert.equal(await assetResponse.text(),readFileSync('dist'+asset,'utf8'),'公開JavaScriptの内容が検証済みのローカルビルドと一致すること');
+  console.log('公開JavaScript: ローカルビルドとの完全一致を確認');
+}
 assert.equal((await fetch(base+asset)).status,401,'認証済みアセットが匿名アクセスへキャッシュ配信されないこと');
 assert.equal((await fetch(base+'/api/analyze',{headers:{Cookie:cookie+'tampered'}})).status,401);
 const configResponse=await fetch(base+'/api/analyze',{headers:authorizedHeaders});assert.equal(configResponse.status,200);const config=await configResponse.json();assert.equal(config.authenticated,true);

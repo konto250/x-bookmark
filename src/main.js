@@ -5,6 +5,8 @@ import { DEFAULT_MODEL } from './analysis-config.js';
 import { createAnalysisCache } from './analysis-cache.js';
 import { createBackup, parseBackup, restoreBackup, MAX_BACKUP_BYTES } from './backup.js';
 import { existingTagsByUsage, preferExistingTags, tagKey } from './tag-policy.js';
+import { createRetagDialog } from './retag-dialog.js';
+import { createSavedPostAnalyzer } from './retag-analysis.js';
 
 const icons = {
   bookmark: '<path d="M6 4h12v17l-6-4-6 4z"/>',
@@ -32,8 +34,10 @@ let draft = null, excludedTags = new Set(), analyzing = false, controller = null
 let toastTimer;
 let pendingRestore = null, importSequence = 0;
 let configPromise, sessionCheck;
+let retagger;
 const LOGOUT_KEY = 'postnote.logout';
 const analysisCache = createAnalysisCache({storage: () => localStorage, crypto: window.crypto});
+const analyzeSavedPost = createSavedPostAnalyzer({getConfig:async()=>{await configPromise;return state.config;},cache:analysisCache,fetcher:(...args)=>fetch(...args),locks:navigator.locks,onUnauthorized:()=>lockApp()});
 function toast(message) {$('#toast').textContent = message; $('#toast').classList.add('visible'); clearTimeout(toastTimer); toastTimer = setTimeout(()=>$('#toast').classList.remove('visible'),4500);}
 function loadPosts() {try {state.posts = readPosts(); state.error = '';} catch {state.error = '保存データを読み取れませんでした。ブラウザーの保存設定をご確認ください。既存データは上書きしません。';}}
 const allTags = () => [...new Set(state.posts.flatMap(p => p.tags))].sort((a,b)=>a.localeCompare(b,'ja'));
@@ -82,6 +86,11 @@ function renderShell() {
   $('#search').addEventListener('input', event => {state.search = event.target.value; renderCollection();});
   $('#sort').addEventListener('change', event => {state.sort = event.target.value; renderCollection();});
   $('#group-button').addEventListener('click', ()=>{state.grouped = !state.grouped; renderCollection();});
+  const retagButton=Object.assign(document.createElement('button'),{type:'button',className:'secondary',textContent:'タグを付け直す'});
+  retagButton.dataset.action='retag';$('#group-button').before(retagButton);
+  retagger=createRetagDialog({document,storage:()=>localStorage,analyze:analyzeSavedPost,confirm:message=>confirm(message),onSaved:(posts,message)=>{
+    state.posts=posts;state.filter=null;state.search='';state.error='';$('#search').value='';renderAll();toast(message);
+  }});
   $('#analyze').addEventListener('click', () => analyzeDraft());
   const refresh = Object.assign(document.createElement('button'), {id:'reanalyze', type:'button', className:'text-button', textContent:'再解析（API使用）', hidden:true});
   refresh.addEventListener('click', () => analyzeDraft({force:true}));
@@ -268,6 +277,7 @@ function onClick(event) {
     case 'settings': openSettings();break;
     case 'reset': state.filter=null;state.search='';$('#search').value='';renderAll();break;
     case 'backup': openBackup();break;
+    case 'retag': try {retagger.open();} catch(error) {toast(error.message || '保存済みポストを読み取れませんでした。');}break;
     case 'export': try {const data=createBackup(readPosts());downloadFile(data,`postnote-${data.exportedAt.replace(/[:.]/g,'-')}.json`);$('#backup-error').textContent='';toast(`${data.bookmarks.length}件のバックアップのダウンロードを開始しました。`);} catch {$('#backup-error').textContent='バックアップを書き出せませんでした。ブラウザーの保存設定と保存データを確認してください。';}break;
     case 'import': $('#import-file').click();break;
     case 'copy-bookmarklet': navigator.clipboard.writeText(buildBookmarklet(location.origin)).then(()=>toast('ブックマークレットをコピーしました。')).catch(()=>{$('#bookmarklet-code').focus();$('#bookmarklet-code').select();toast('コードを選択しました。手動でコピーしてください。');});break;
@@ -275,6 +285,7 @@ function onClick(event) {
 }
 
 function lockApp(message = 'ログインが必要です。') {
+  retagger?.dispose();retagger=null;
   controller?.abort();draft=null;analyzing=false;pendingRestore=null;importSequence++;state.posts=[];state.config=null;
   document.querySelectorAll('dialog[open]').forEach(dialog=>dialog.close());
   $('#app').hidden=false;
