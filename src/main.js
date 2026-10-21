@@ -3,6 +3,7 @@ import { STORAGE_KEY, DRAFT_KEY, normalizePost, normalizeTags, extractHashtags, 
 import { buildBookmarklet } from './bookmarklet.js';
 import { DEFAULT_MODEL } from './analysis-config.js';
 import { createAnalysisCache } from './analysis-cache.js';
+import { createBackup, parseBackup, restoreBackup, MAX_BACKUP_BYTES } from './backup.js';
 
 const icons = {
   bookmark: '<path d="M6 4h12v17l-6-4-6 4z"/>',
@@ -28,6 +29,7 @@ const $ = s => document.querySelector(s);
 const state = {posts: [], filter: null, search: '', grouped: false, sort: 'new', error: '', config: null};
 let draft = null, excludedTags = new Set(), analyzing = false, controller = null;
 let toastTimer;
+let pendingRestore = null, importSequence = 0;
 const analysisCache = createAnalysisCache({storage: () => localStorage, crypto: window.crypto});
 function toast(message) {$('#toast').textContent = message; $('#toast').classList.add('visible'); clearTimeout(toastTimer); toastTimer = setTimeout(()=>$('#toast').classList.remove('visible'),4500);}
 function loadPosts() {try {state.posts = readPosts(); state.error = '';} catch {state.error = '保存データを読み取れませんでした。ブラウザーの保存設定をご確認ください。既存データは上書きしません。';}}
@@ -45,7 +47,7 @@ function renderShell() {
       <div class="local-note">${icon('lock')}<span>このブラウザーに保存<small>あなただけのブックマーク</small></span></div></div>
     </aside>
     <main>
-      <header class="topbar"><span class="breadcrumb">ライブラリー <span>/</span> <b id="breadcrumb">すべてのポスト</b></span><div class="top-actions"><button class="icon-button" data-action="export" title="バックアップを書き出す" aria-label="バックアップを書き出す">${icon('download')}</button><button class="icon-button" data-action="import" title="バックアップを読み込む" aria-label="バックアップを読み込む">${icon('upload')}</button><span class="avatar">私</span></div></header>
+      <header class="topbar"><span class="breadcrumb">ライブラリー <span>/</span> <b id="breadcrumb">すべてのポスト</b></span><div class="top-actions"><button class="secondary backup-open" data-action="backup">${icon('download')}バックアップ・復元</button><span class="avatar">私</span></div></header>
       <div class="main-content"><div class="page-heading"><div><div class="eyebrow">YOUR PERSONAL COLLECTION</div><h1 id="page-title">すべてのポスト</h1><p>また読みたい。あとで試したい。その気持ちを、残しておこう。</p></div><button class="primary" data-action="add">${icon('plus')}ポストを追加</button></div>
       <section class="quickstart"><div class="quickstart-icon">${icon('bookmark')}</div><div><strong>Xで見つけたら、ワンクリック。</strong><p>ブックマークレットで本文を取り込み、AIがタグを提案します。</p></div><button class="secondary" data-action="setup">ブックマークレットを設定 ${icon('arrow')}</button></section>
       <div id="storage-error" role="alert"></div>
@@ -54,6 +56,11 @@ function renderShell() {
       <footer class="page-footer"><span>気になるポストが、あなたの知識になる。</span><span>${icon('lock')} ブラウザー内に保存</span></footer></div>
     </main>
     <input id="import-file" type="file" accept="application/json,.json" hidden />
+    <dialog id="backup" aria-labelledby="backup-title"><div class="dialog-header"><h2 id="backup-title">バックアップ・復元</h2><button type="button" class="icon-button" data-close="backup" aria-label="閉じる">${icon('close')}</button></div>
+      <div class="dialog-body"><section class="backup-section"><h3>バックアップを保存</h3><p id="backup-count" class="note"></p><p class="fineprint">本文・タグ・リンク情報・保存日時をJSONファイルに保存します。検索やタグで絞り込んでいても全件を書き出します。</p><button class="secondary" data-action="export">${icon('download')}JSONファイルを保存</button></section>
+      <section class="backup-section"><h3>ファイルから復元</h3><p class="fineprint">別の端末で保存したバックアップも読み込めます。ファイルの内容を確認してから復元します（50MBまで）。</p><button class="secondary" data-action="import">${icon('upload')}バックアップファイルを選ぶ</button><p id="restore-preview" class="note" role="status">ファイルを選択してください。</p>
+      <label class="field">復元方法<select id="restore-mode"><option value="merge">追加・統合する（既存のポストを残す）</option><option value="replace">すべて置き換える（バックアップの状態に戻す）</option></select></label><p id="restore-description" class="fineprint"></p><button id="restore-button" class="primary" disabled>復元する</button></section>
+      <p class="fineprint">バックアップと復元はブラウザー内で処理します。AI料金は発生しません。AIの認証情報・下書き・提案キャッシュは含みません。</p><p id="backup-error" class="error-message" role="alert"></p></div><div class="dialog-footer"><span></span><button class="secondary" data-close="backup">閉じる</button></div></dialog>
     <dialog id="editor" aria-labelledby="editor-title"><form id="editor-form"><div class="dialog-header"><div><div class="eyebrow">SAVE A LITTLE INSPIRATION</div><h2 id="editor-title">ポストを保存</h2></div><button type="button" class="icon-button" data-close="editor" aria-label="閉じる">${icon('close')}</button></div>
       <div class="dialog-body"><label class="field">ポストのURL<input id="post-url" type="url" required placeholder="https://x.com/username/status/…" /></label><label class="field">投稿者<input id="post-author" maxlength="160" placeholder="名前・@ユーザー名（任意）" /></label><label class="field">ポストの本文<textarea id="post-text" rows="5" maxlength="30000" placeholder="ポストの本文を入力。ブックマークレットを使うと自動で取り込めます。"></textarea></label>
       <div class="ai-panel"><div class="section-heading"><span>${icon('spark')}AIでタグを提案</span><button id="analyze" type="button" class="small-button">内容を解析する</button></div><p class="fineprint">本文・本文中のリンク先（最大5件）・既存タグをOpenAIへ送って分類します。</p><p id="analysis-status" class="analysis-status" role="status" aria-live="polite"></p><div id="pages"></div></div>
@@ -63,7 +70,7 @@ function renderShell() {
       <p class="intro">次のボタンをブラウザーの<strong>ブックマークバーへドラッグ</strong>してください。</p><div class="bookmarklet-zone"><a id="bookmarklet" class="bookmarklet" draggable="true">${icon('bookmark')}ポストノートに保存</a><span>↑ ブックマークバーへドラッグ</span></div>
       <ol class="steps"><li><span>1</span><div><strong>Xでポストの詳細を開く</strong><p>ポストの日時をクリック。長い本文は「さらに表示」で展開します。</p></div></li><li><span>2</span><div><strong>「ポストノートに保存」をクリック</strong><p>新しいタブに本文を取り込み、AI設定済みならタグを提案します。</p></div></li><li><span>3</span><div><strong>タグを整えて、保存</strong><p>いらないタグを外し、好きなタグを追加して、自分の引き出しへ。</p></div></li></ol>
       <details><summary>ドラッグできない場合・スマートフォン</summary><p>ボタンからコードをコピーし、ブラウザーのブックマーク編集画面でURL欄に貼り付けてください。先頭の「javascript:」が残っていることを確認します。実行できない環境では「ポストを追加」からURLと本文を入力できます。</p><button class="secondary" data-action="copy-bookmarklet">コードをコピー</button><textarea id="bookmarklet-code" readonly aria-label="ブックマークレットのコード"></textarea></details>
-      <div class="note">本文を取得できない場合は、この画面からブックマークレットを登録し直してください。登録済みのコードは自動更新されません。</div><div class="note">ブックマークはブラウザー・端末・サイトのURLごとに保存されます。データを消す前や別の端末へ移すときは、右上の書き出しボタンでバックアップしてください。</div>
+      <div class="note">本文を取得できない場合は、この画面からブックマークレットを登録し直してください。登録済みのコードは自動更新されません。</div><div class="note">ブックマークはブラウザー・端末・サイトのURLごとに保存されます。データを消す前や別の端末へ移すときは、右上の「バックアップ・復元」からファイルを保存してください。</div>
     </div><div class="dialog-footer"><span></span><button class="primary" data-close="setup">はじめる ${icon('arrow')}</button></div></dialog>
     <dialog id="settings" aria-labelledby="settings-title"><form id="settings-form"><div class="dialog-header"><h2 id="settings-title">AIタグ提案の設定</h2><button type="button" class="icon-button" data-close="settings" aria-label="閉じる">${icon('close')}</button></div><div class="dialog-body"><div id="config-status" class="note"></div><label class="field">アプリのアクセスコード<input id="access-code" type="password" autocomplete="off" placeholder="管理者が設定したコード" /></label><p class="fineprint">OpenAIのAPIキーではありません。一度入力すると、このブラウザーで30日間AIタグ提案を利用できます。</p><p id="settings-error" class="error-message" role="alert"></p><details><summary>管理者向け：OpenAI APIの設定方法</summary><p>Vercelのプロジェクト設定で環境変数 <code>OPENAI_API_KEY</code> と、このアプリ専用の長いランダムな <code>APP_ACCESS_TOKEN</code> を設定し、再デプロイしてください。<code>OPENAI_MODEL</code> でモデルを指定できます（初期値：gpt-6-luna）。</p><p>ChatGPTのログインやサブスクリプションではなく、OpenAI APIのキーが必要です。</p></details></div><div class="dialog-footer"><span>OpenAI API</span><button class="primary" type="submit">設定を保存</button></div></form></dialog>`;
   $('#bookmarklet').setAttribute('href', buildBookmarklet(location.origin));
@@ -83,6 +90,9 @@ function renderShell() {
   $('#post-text').addEventListener('change', () => {syncDraft(); applyHashtags(); persistDraft();});
   $('#settings-form').addEventListener('submit', saveSettings);
   $('#import-file').addEventListener('change', importBackup);
+  $('#restore-mode').addEventListener('change', renderRestoreDescription);
+  $('#restore-button').addEventListener('click', confirmRestore);
+  $('#backup').addEventListener('close',()=>{importSequence++;pendingRestore=null;});
   $('#editor').addEventListener('close',()=>{controller?.abort(); analyzing = false; draft = null;});
   document.addEventListener('click', onClick);
 }
@@ -205,17 +215,42 @@ async function saveSettings(event) {
   catch(error){$('#settings-error').textContent=error.message || '設定を保存できませんでした。';}finally{button.disabled=false;}
 }
 function downloadFile(data,filename) {const url = URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json'}));const a = document.createElement('a');a.href=url;a.download=filename;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
+function renderRestoreDescription() {
+  $('#restore-description').textContent = $('#restore-mode').value === 'replace' ? '現在のブックマークを削除し、ファイルの内容に置き換えます。必要なら先にバックアップを保存してください。' : '現在のブックマークを残して追加します。同じポストはファイルの本文・タグで更新し、最初の保存日時は維持します。';
+}
+function openBackup() {
+  importSequence++; pendingRestore = null;
+  $('#backup-error').textContent = ''; $('#restore-preview').textContent = 'ファイルを選択してください。';
+  $('#restore-button').disabled = true; $('#restore-mode').value = 'merge'; $('#import-file').value = '';
+  try {$('#backup-count').textContent = `保存中のブックマーク：${readPosts().length}件`;} catch {$('#backup-count').textContent = '現在の保存データを読み取れません。バックアップからの置き換え復元は利用できます。';}
+  renderRestoreDescription(); $('#backup').showModal();
+}
 async function importBackup(event) {
   const file = event.target.files[0]; if(!file) return;
+  const sequence = ++importSequence;
+  pendingRestore = null; $('#restore-button').disabled = true; $('#backup-error').textContent = '';
+  $('#restore-preview').textContent = 'ファイルを確認しています…';
   try {
-    if(file.size > 10_000_000) throw new Error('10MB以下のバックアップを選択してください。');
-    const data = JSON.parse(await file.text());
-    const posts = Array.isArray(data) ? data : data.bookmarks;
-    if(!Array.isArray(posts) || posts.length > 10000) throw new Error('バックアップの形式を確認してください。');
-    const normalized = posts.map(normalizePost);
-    if(!confirm(`${normalized.length}件を読み込みます。同じポストがある場合はバックアップの内容で更新します。よろしいですか？`)) return;
-    state.posts = upsertPosts(normalized); state.error = '';renderAll();toast(`${normalized.length}件のブックマークを読み込みました。`);
-  } catch(error) {toast(`読み込めませんでした。${error.message}`);} finally {event.target.value='';}
+    if(file.size > MAX_BACKUP_BYTES) throw new Error('50MB以下のバックアップを選択してください。');
+    const source = await file.text();
+    if(sequence !== importSequence) return;
+    pendingRestore = parseBackup(source);
+    let detail = '';
+    try {const ids=new Set(readPosts().map(p=>p.id));const overlap=pendingRestore.filter(p=>ids.has(p.id)).length;detail=`（新規${pendingRestore.length-overlap}件・既存と重複${overlap}件）`;} catch {detail='（既存データを読み取れないため「すべて置き換える」を選んでください）';}
+    $('#restore-preview').textContent = `${file.name}：${pendingRestore.length}件 ${detail}`;
+    $('#restore-button').disabled = false;
+  } catch(error) {if(sequence === importSequence) {pendingRestore=null;$('#restore-preview').textContent='ファイルを選び直してください。';$('#backup-error').textContent=error.message;}}
+  finally {if(sequence === importSequence) event.target.value='';}
+}
+function confirmRestore() {
+  if(!pendingRestore) return;
+  const mode = $('#restore-mode').value, count = pendingRestore.length;
+  const message = mode === 'replace' ? `現在のブックマークをすべて削除し、バックアップの${count}件に置き換えます。復元しますか？` : `${count}件を追加・統合します。同じポストの本文・タグはバックアップの内容で更新します。復元しますか？`;
+  if(!confirm(message)) return;
+  try {
+    state.posts=restoreBackup(pendingRestore,mode); state.error=''; state.filter=null;state.search='';$('#search').value='';
+    renderAll();$('#backup').close();toast(`${count}件のブックマークを復元しました。`);
+  } catch(error) {$('#backup-error').textContent = error.name === 'QuotaExceededError' ? '保存容量が不足しています。復元できませんでした。既存データは変更していません。' : `復元できませんでした。${error.message}`;}
 }
 function onClick(event) {
   const el = event.target.closest('button, [data-action]'); if(!el) return;
@@ -232,7 +267,8 @@ function onClick(event) {
     case 'setup': $('#setup').showModal();break;
     case 'settings': openSettings();break;
     case 'reset': state.filter=null;state.search='';$('#search').value='';renderAll();break;
-    case 'export': try {downloadFile({version:1,exportedAt:new Date().toISOString(),bookmarks:readPosts()},`postnote-${new Date().toISOString().slice(0,10)}.json`);toast('バックアップを書き出しました。');} catch {toast('保存データを読み取れないため書き出せませんでした。');}break;
+    case 'backup': openBackup();break;
+    case 'export': try {const data=createBackup(readPosts());downloadFile(data,`postnote-${data.exportedAt.replace(/[:.]/g,'-')}.json`);$('#backup-error').textContent='';toast(`${data.bookmarks.length}件のバックアップのダウンロードを開始しました。`);} catch {$('#backup-error').textContent='バックアップを書き出せませんでした。ブラウザーの保存設定と保存データを確認してください。';}break;
     case 'import': $('#import-file').click();break;
     case 'copy-bookmarklet': navigator.clipboard.writeText(buildBookmarklet(location.origin)).then(()=>toast('ブックマークレットをコピーしました。')).catch(()=>{$('#bookmarklet-code').focus();$('#bookmarklet-code').select();toast('コードを選択しました。手動でコピーしてください。');});break;
   }

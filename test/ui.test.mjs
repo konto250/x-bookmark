@@ -7,6 +7,7 @@ import { buildBookmarklet } from '../src/bookmarklet.js';
 import { webcrypto } from 'node:crypto';
 import { createAnalysisCache, ANALYSIS_CACHE_KEY } from '../src/analysis-cache.js';
 import { DEFAULT_MODEL } from '../src/analysis-config.js';
+import * as backup from '../src/backup.js';
 
 const source=readFileSync(new URL('../src/main.js',import.meta.url),'utf8').replace(/^import .*;\r?\n/gm,'');
 const tick=()=>new Promise(resolve=>setTimeout(resolve,10));
@@ -16,6 +17,7 @@ async function app({posts=[],capture,configured=false,analyze,cache}={}) {
   const w=dom.window;
   Object.assign(w,model,{readPosts:()=>model.readPosts(w.localStorage),upsertPosts:incoming=>model.upsertPosts(incoming,w.localStorage),buildBookmarklet});
   Object.assign(w,{DEFAULT_MODEL,createAnalysisCache:options=>createAnalysisCache({...options,crypto:webcrypto})});
+  Object.assign(w,backup,{restoreBackup:(posts,mode)=>backup.restoreBackup(posts,mode,w.localStorage)});
   if(cache) w.localStorage.setItem(ANALYSIS_CACHE_KEY,cache);
   w.HTMLDialogElement.prototype.showModal=function(){this.open=true;};
   w.HTMLDialogElement.prototype.close=function(){this.open=false;this.dispatchEvent(new w.Event('close'));};
@@ -30,6 +32,43 @@ async function app({posts=[],capture,configured=false,analyze,cache}={}) {
   return {dom,w,$,click,fill,submit};
 }
 const post=(id,text,tags)=>model.normalizePost({url:`https://x.com/test/status/${id}`,text,tags,author:'テスト\n@test'});
+
+async function chooseBackup(a,source,name='バックアップ.json') {
+  Object.defineProperty(a.$('#import-file'),'files',{configurable:true,value:[{name,size:source.length,text:async()=>source}]});
+  a.$('#import-file').dispatchEvent(new a.w.Event('change',{bubbles:true}));await tick();
+}
+test('画面から全件をダウンロードし、ファイルを確認して別の保存領域へ復元する',async()=>{
+  const posts=[post(1,'開発の本文',['開発']),post(2,'旅行の本文',['旅行'])];
+  const a=await app({posts});let exported,filename;
+  try {
+    a.w.URL.createObjectURL=blob=>{exported=blob;return 'blob:backup';};a.w.URL.revokeObjectURL=()=>{};
+    a.w.HTMLAnchorElement.prototype.click=function(){filename=this.download;};
+    a.fill('#search','開発');a.click('[data-action="backup"]');a.click('[data-action="export"]');
+    assert.match(filename,/^postnote-.*\.json$/);
+    const source=await new Promise((resolve,reject)=>{const reader=new a.w.FileReader();reader.onload=()=>resolve(reader.result);reader.onerror=reject;reader.readAsText(exported);});
+    assert.equal(JSON.parse(source).bookmarks.length,2);
+    const b=await app();try {
+      b.click('[data-action="backup"]');await chooseBackup(b,source);
+      assert.match(b.$('#restore-preview').textContent,/新規2件/);assert.equal(model.readPosts(b.w.localStorage).length,0);
+      b.click('#restore-button');assert.equal(b.$('#backup').open,false);assert.deepEqual(model.readPosts(b.w.localStorage),posts);
+      assert.equal(b.w.document.querySelectorAll('.post-card').length,2);
+    } finally {b.dom.window.close();}
+  } finally {a.dom.window.close();}
+});
+test('復元のキャンセル・不正ファイルでは変更せず、置き換えは確認後だけ行う',async()=>{
+  const original=post(1,'残す本文',['元']),incoming=post(2,'復元した本文',['復元']);
+  const a=await app({posts:[original]});
+  try {
+    a.click('[data-action="backup"]');await chooseBackup(a,JSON.stringify(backup.createBackup([incoming])));
+    a.w.confirm=()=>false;a.click('#restore-button');assert.deepEqual(model.readPosts(a.w.localStorage),[original]);
+    await chooseBackup(a,'破損データ');assert.equal(a.$('#restore-button').disabled,true);assert.match(a.$('#backup-error').textContent,/JSON/);
+    assert.deepEqual(model.readPosts(a.w.localStorage),[original]);
+    await chooseBackup(a,JSON.stringify([incoming]),'<img src=x>.json');assert.equal(a.$('#restore-preview img'),null);
+    a.fill('#restore-mode','replace');a.$('#restore-mode').dispatchEvent(new a.w.Event('change'));
+    a.w.confirm=message=>{assert.match(message,/すべて削除/);return true;};a.click('#restore-button');
+    assert.deepEqual(model.readPosts(a.w.localStorage),[incoming]);
+  } finally {a.dom.window.close();}
+});
 
 test('同じ内容はAPIを再呼び出しせず、再取り込みでも削除タグを戻さない。明示的な再解析と本文変更時はAPIを呼ぶ',async()=>{
   let calls=0;
