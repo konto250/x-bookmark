@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.vercel/
+.env*
+!.env.example
+test-results/
+playwright-report/
+.local/
+
+.vercel
+.env*
