@@ -6,7 +6,7 @@ import { JSDOM } from 'jsdom';
 const index=readFileSync('dist/index.html','utf8');
 const script=index.match(/src="(\/assets\/[^\"]+\.js)"/)[1];
 const app=new JSDOM('<div id="app"></div><div id="toast"></div>',{url:'https://x-bookmark-lemon.vercel.app',runScripts:'outside-only'});
-app.window.fetch=async()=>({ok:true,json:async()=>({configured:false})});
+app.window.fetch=async()=>({ok:true,json:async()=>({configured:false,authenticated:true})});
 try {
   app.window.eval(readFileSync('dist'+script,'utf8'));
   await new Promise(resolve=>setTimeout(resolve,0));

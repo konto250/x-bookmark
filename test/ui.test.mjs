@@ -11,7 +11,7 @@ import * as backup from '../src/backup.js';
 
 const source=readFileSync(new URL('../src/main.js',import.meta.url),'utf8').replace(/^import .*;\r?\n/gm,'');
 const tick=()=>new Promise(resolve=>setTimeout(resolve,10));
-async function app({posts=[],capture,configured=false,analyze,cache}={}) {
+async function app({posts=[],capture,configured=false,analyze,cache,authenticated=true}={}) {
   const url='https://postnote.test/'+(capture?'#capture='+encodeURIComponent(JSON.stringify(capture)):'');
   const dom=new JSDOM('<div id="app"></div><div id="toast"></div>',{url,runScripts:'outside-only',pretendToBeVisual:true});
   const w=dom.window;
@@ -22,7 +22,7 @@ async function app({posts=[],capture,configured=false,analyze,cache}={}) {
   w.HTMLDialogElement.prototype.showModal=function(){this.open=true;};
   w.HTMLDialogElement.prototype.close=function(){this.open=false;this.dispatchEvent(new w.Event('close'));};
   w.confirm=()=>true;
-  w.fetch=async(_url,init)=> !init ? {ok:true,json:async()=>({configured,authenticated:configured,model:'テスト用モック'})} : analyze ? analyze(init) : {ok:false,json:async()=>({error:'AI設定待ち'})};
+  w.fetch=async(url,init)=> url === '/api/session' ? {ok:true,json:async()=>({authenticated,configured:true})} : !init ? {ok:true,json:async()=>({configured,authenticated:true,model:'テスト用モック'})} : analyze ? analyze(init) : {ok:false,json:async()=>({error:'AI設定待ち'})};
   if(posts.length)w.localStorage.setItem(model.STORAGE_KEY,JSON.stringify(posts));
   w.eval(source); await tick();
   const $=s=>w.document.querySelector(s);
@@ -32,6 +32,19 @@ async function app({posts=[],capture,configured=false,analyze,cache}={}) {
   return {dom,w,$,click,fill,submit};
 }
 const post=(id,text,tags)=>model.normalizePost({url:`https://x.com/test/status/${id}`,text,tags,author:'テスト\n@test'});
+
+test('未ログイン時は保存済み本文やバックアップ操作を表示しない',async()=>{
+  const original=post(1,'非公開の本文',['個人用']);const a=await app({posts:[original],authenticated:false});
+  try {assert.equal(a.$('#navigation'),null);assert.equal(a.$('[data-action="backup"]'),null);assert.doesNotMatch(a.$('#app').textContent,/非公開の本文/);assert.match(a.$('#app').textContent,/ログイン/);assert.deepEqual(model.readPosts(a.w.localStorage),[original]);}finally{a.dom.window.close();}
+});
+test('ログアウトで表示を閉じ、ブックマークを保持して他タブへ通知する',async()=>{
+  const original=post(1,'非公開の本文',['個人用']);const a=await app({posts:[original]});
+  try {a.click('[data-action="logout"]');await tick();assert.equal(a.$('#navigation'),null);assert.match(a.$('#app').textContent,/ログアウトしました/);assert.deepEqual(model.readPosts(a.w.localStorage),[original]);assert.ok(a.w.localStorage.getItem('postnote.logout'));}finally{a.dom.window.close();}
+});
+test('別タブでログアウトしたら一覧と開いていた復元画面を閉じる',async()=>{
+  const a=await app({posts:[post(1,'非公開の本文',[])]});
+  try {a.click('[data-action="backup"]');a.w.dispatchEvent(new a.w.StorageEvent('storage',{key:'postnote.logout',newValue:'1'}));assert.equal(a.$('#backup'),null);assert.equal(a.$('#navigation'),null);assert.doesNotMatch(a.$('#app').textContent,/非公開の本文/);}finally{a.dom.window.close();}
+});
 
 async function chooseBackup(a,source,name='バックアップ.json') {
   Object.defineProperty(a.$('#import-file'),'files',{configurable:true,value:[{name,size:source.length,text:async()=>source}]});

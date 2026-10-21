@@ -30,6 +30,8 @@ const state = {posts: [], filter: null, search: '', grouped: false, sort: 'new',
 let draft = null, excludedTags = new Set(), analyzing = false, controller = null;
 let toastTimer;
 let pendingRestore = null, importSequence = 0;
+let configPromise, sessionCheck;
+const LOGOUT_KEY = 'postnote.logout';
 const analysisCache = createAnalysisCache({storage: () => localStorage, crypto: window.crypto});
 function toast(message) {$('#toast').textContent = message; $('#toast').classList.add('visible'); clearTimeout(toastTimer); toastTimer = setTimeout(()=>$('#toast').classList.remove('visible'),4500);}
 function loadPosts() {try {state.posts = readPosts(); state.error = '';} catch {state.error = '保存データを読み取れませんでした。ブラウザーの保存設定をご確認ください。既存データは上書きしません。';}}
@@ -47,7 +49,7 @@ function renderShell() {
       <div class="local-note">${icon('lock')}<span>このブラウザーに保存<small>あなただけのブックマーク</small></span></div></div>
     </aside>
     <main>
-      <header class="topbar"><span class="breadcrumb">ライブラリー <span>/</span> <b id="breadcrumb">すべてのポスト</b></span><div class="top-actions"><button class="secondary backup-open" data-action="backup">${icon('download')}バックアップ・復元</button><span class="avatar">私</span></div></header>
+      <header class="topbar"><span class="breadcrumb">ライブラリー <span>/</span> <b id="breadcrumb">すべてのポスト</b></span><div class="top-actions"><button class="secondary backup-open" data-action="backup">${icon('download')}バックアップ・復元</button><button class="text-button" data-action="logout">ログアウト</button></div></header>
       <div class="main-content"><div class="page-heading"><div><div class="eyebrow">YOUR PERSONAL COLLECTION</div><h1 id="page-title">すべてのポスト</h1><p>また読みたい。あとで試したい。その気持ちを、残しておこう。</p></div><button class="primary" data-action="add">${icon('plus')}ポストを追加</button></div>
       <section class="quickstart"><div class="quickstart-icon">${icon('bookmark')}</div><div><strong>Xで見つけたら、ワンクリック。</strong><p>ブックマークレットで本文を取り込み、AIがタグを提案します。</p></div><button class="secondary" data-action="setup">ブックマークレットを設定 ${icon('arrow')}</button></section>
       <div id="storage-error" role="alert"></div>
@@ -72,7 +74,7 @@ function renderShell() {
       <details><summary>ドラッグできない場合・スマートフォン</summary><p>ボタンからコードをコピーし、ブラウザーのブックマーク編集画面でURL欄に貼り付けてください。先頭の「javascript:」が残っていることを確認します。実行できない環境では「ポストを追加」からURLと本文を入力できます。</p><button class="secondary" data-action="copy-bookmarklet">コードをコピー</button><textarea id="bookmarklet-code" readonly aria-label="ブックマークレットのコード"></textarea></details>
       <div class="note">本文を取得できない場合は、この画面からブックマークレットを登録し直してください。登録済みのコードは自動更新されません。</div><div class="note">ブックマークはブラウザー・端末・サイトのURLごとに保存されます。データを消す前や別の端末へ移すときは、右上の「バックアップ・復元」からファイルを保存してください。</div>
     </div><div class="dialog-footer"><span></span><button class="primary" data-close="setup">はじめる ${icon('arrow')}</button></div></dialog>
-    <dialog id="settings" aria-labelledby="settings-title"><form id="settings-form"><div class="dialog-header"><h2 id="settings-title">AIタグ提案の設定</h2><button type="button" class="icon-button" data-close="settings" aria-label="閉じる">${icon('close')}</button></div><div class="dialog-body"><div id="config-status" class="note"></div><label class="field">アプリのアクセスコード<input id="access-code" type="password" autocomplete="off" placeholder="管理者が設定したコード" /></label><p class="fineprint">OpenAIのAPIキーではありません。一度入力すると、このブラウザーで30日間AIタグ提案を利用できます。</p><p id="settings-error" class="error-message" role="alert"></p><details><summary>管理者向け：OpenAI APIの設定方法</summary><p>Vercelのプロジェクト設定で環境変数 <code>OPENAI_API_KEY</code> と、このアプリ専用の長いランダムな <code>APP_ACCESS_TOKEN</code> を設定し、再デプロイしてください。<code>OPENAI_MODEL</code> でモデルを指定できます（初期値：gpt-6-luna）。</p><p>ChatGPTのログインやサブスクリプションではなく、OpenAI APIのキーが必要です。</p></details></div><div class="dialog-footer"><span>OpenAI API</span><button class="primary" type="submit">設定を保存</button></div></form></dialog>`;
+    <dialog id="settings" aria-labelledby="settings-title"><div class="dialog-header"><h2 id="settings-title">AIタグ提案の設定</h2><button type="button" class="icon-button" data-close="settings" aria-label="閉じる">${icon('close')}</button></div><div class="dialog-body"><div id="config-status" class="note"></div><p class="fineprint">ログイン中はAIタグ提案を利用できます。パスワードはブラウザーのlocalStorageに保存しません。</p><details><summary>管理者向け：OpenAI APIの設定方法</summary><p>Vercelの環境変数 <code>OPENAI_API_KEY</code> でAPIキー、<code>OPENAI_MODEL</code> でモデルを指定します（初期値：${DEFAULT_MODEL}）。変更後は再デプロイしてください。</p></details></div><div class="dialog-footer"><span>OpenAI API</span><button class="secondary" data-close="settings">閉じる</button></div></dialog>`;
   $('#bookmarklet').setAttribute('href', buildBookmarklet(location.origin));
   $('#bookmarklet-code').value = buildBookmarklet(location.origin);
   $('#bookmarklet').addEventListener('click', event => {event.preventDefault(); toast('このボタンをブックマークバーへドラッグしてください。');});
@@ -88,7 +90,6 @@ function renderShell() {
   $('#editor-form').addEventListener('submit', saveDraft);
   for (const id of ['post-url','post-author','post-text']) $(`#${id}`).addEventListener('input', persistDraft);
   $('#post-text').addEventListener('change', () => {syncDraft(); applyHashtags(); persistDraft();});
-  $('#settings-form').addEventListener('submit', saveSettings);
   $('#import-file').addEventListener('change', importBackup);
   $('#restore-mode').addEventListener('change', renderRestoreDescription);
   $('#restore-button').addEventListener('click', confirmRestore);
@@ -170,6 +171,7 @@ async function analyzeDraft({force = false} = {}) {
       const cached = !force && key && analysisCache.get(key, post);
       if(cached) return {result:cached, reused:true, ok:true};
       const response = await fetch('/api/analyze',{method:'POST',headers:{'Content-Type':'application/json'},signal,body:JSON.stringify({...post,existingTags:allTags()})});
+      if(response.status === 401) {lockApp();throw new DOMException('ログインが必要です。','AbortError');}
       const result = await response.json();
       if(response.ok && key) analysisCache.put(key, result, post);
       return {result, reused:false, ok:response.ok};
@@ -202,17 +204,12 @@ function saveDraft(event) {
 }
 
 async function loadConfig() {
-  try {const response = await fetch('/api/analyze'); if(!response.ok) throw new Error(); state.config = await response.json();} catch {state.config = null;}
-  $('#ai-dot').classList.toggle('ready',Boolean(state.config?.configured));
+  try {const response = await fetch('/api/analyze'); if(response.status === 401) {lockApp();return;} if(!response.ok) throw new Error(); state.config = await response.json();} catch {state.config = null;}
+  $('#ai-dot')?.classList.toggle('ready',Boolean(state.config?.configured));
 }
 function openSettings() {
-  $('#config-status').textContent = state.config?.configured ? `OpenAI API 設定済み / ${state.config.model}。${hasSession() ? 'このブラウザーではAIタグ提案を利用できます。' : 'アクセスコードを入力するとタグ提案を利用できます。'}` : 'AIタグ提案はサーバーの設定待ちです。手動でタグを付けて保存できます。';
-  $('#access-code').value = ''; $('#settings-error').textContent = ''; $('#settings').showModal();
-}
-async function saveSettings(event) {
-  event.preventDefault(); const button=event.submitter;button.disabled=true;$('#settings-error').textContent='';
-  try {const response=await fetch('/api/analyze',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'authenticate',accessCode:$('#access-code').value.trim()})});const data=await response.json();if(!response.ok)throw new Error(data.error);$('#access-code').value='';await loadConfig();$('#settings').close();toast('AIタグ提案を利用できます。');if($('#editor').open)analyzeDraft();}
-  catch(error){$('#settings-error').textContent=error.message || '設定を保存できませんでした。';}finally{button.disabled=false;}
+  $('#config-status').textContent = state.config?.configured ? `OpenAI API 設定済み / ${state.config.model}。このブラウザーではAIタグ提案を利用できます。` : 'AIタグ提案はサーバーの設定待ちです。手動でタグを付けて保存できます。';
+  $('#settings').showModal();
 }
 function downloadFile(data,filename) {const url = URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json'}));const a = document.createElement('a');a.href=url;a.download=filename;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
 function renderRestoreDescription() {
@@ -263,6 +260,7 @@ function onClick(event) {
     try {const posts=readPosts().filter(p=>p.id!==el.dataset.delete);localStorage.setItem(STORAGE_KEY,JSON.stringify(posts));state.posts=posts;renderAll();toast('ブックマークを削除しました。');} catch {toast('削除できませんでした。');} return;
   }
   switch(el.dataset.action) {
+    case 'logout': logout();break;
     case 'add': {let saved=null;try {saved=JSON.parse(sessionStorage.getItem(DRAFT_KEY));} catch {} openEditor(saved || {});break;}
     case 'setup': $('#setup').showModal();break;
     case 'settings': openSettings();break;
@@ -274,9 +272,38 @@ function onClick(event) {
   }
 }
 
-loadPosts(); renderShell(); renderAll();
-window.addEventListener('storage',event=>{if(event.key===STORAGE_KEY || event.key===null){loadPosts();renderAll();}});
-const configPromise = loadConfig();
+function lockApp(message = 'ログインが必要です。') {
+  controller?.abort();draft=null;analyzing=false;pendingRestore=null;importSequence++;state.posts=[];state.config=null;
+  document.querySelectorAll('dialog[open]').forEach(dialog=>dialog.close());
+  $('#app').hidden=false;
+  $('#app').innerHTML=`<section class="locked-screen"><h1>ポストノート</h1><p>${esc(message)}</p><a class="primary" href="${esc(location.pathname+location.search+location.hash)}">ログイン画面を開く</a></section>`;
+  $('#toast').textContent='';
+}
+async function checkSession() {
+  if(sessionCheck) return sessionCheck;
+  $('#app').hidden=true;
+  sessionCheck=(async()=>{
+    try {const response=await fetch('/api/session',{cache:'no-store'});const data=await response.json();if(!response.ok || !data.authenticated){lockApp();return false;}$('#app').hidden=false;return true;}
+    catch {lockApp('認証を確認できませんでした。通信状態を確認して開き直してください。');return false;}
+  })();
+  try {return await sessionCheck;} finally {sessionCheck=null;}
+}
+async function logout() {
+  try {
+    const response=await fetch('/api/session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'logout'})});
+    if(!response.ok) throw new Error();
+    try {localStorage.setItem(LOGOUT_KEY,String(Date.now()));} catch {}
+    lockApp('ログアウトしました。');
+  } catch {toast('ログアウトできませんでした。通信状態を確認して再試行してください。');}
+}
+async function startApp() {
+  if(!await checkSession()) return;
+  loadPosts();renderShell();renderAll();configPromise=loadConfig();
+  receiveCapture();
+}
+window.addEventListener('storage',event=>{if(event.key===LOGOUT_KEY){lockApp('別のタブでログアウトしました。');return;}if($('#navigation') && (event.key===STORAGE_KEY || event.key===null)){loadPosts();renderAll();}});
+window.addEventListener('pageshow',event=>{if(event.persisted) checkSession();});
+document.addEventListener('visibilitychange',()=>{if(document.visibilityState === 'visible' && $('#navigation')) checkSession();});
 async function receiveCapture() {
   if(!location.hash.startsWith('#capture=')) return;
   const raw = location.hash.slice(9); history.replaceState(null,'',location.pathname+location.search);
@@ -287,7 +314,7 @@ async function receiveCapture() {
     openEditor({...incoming,tags:old?.tags || [],excludedTags:old?.excludedTags || [],createdAt:old?.createdAt || incoming.createdAt},Boolean(old));
     await configPromise;
     if(draft && state.config?.configured && hasSession()) analyzeDraft();
-    else if(draft) {$('#analysis-status').textContent = 'AIタグ提案を使うには「AI設定」でアクセスコードを入力してください。';$('#analysis-status').append(Object.assign(document.createElement('button'),{textContent:'AI設定を開く',className:'text-button',onclick:openSettings}));}
+    else if(draft) {$('#analysis-status').textContent = 'AIタグ提案はサーバーの設定待ちです。ハッシュタグや手動タグで保存できます。';$('#analysis-status').append(Object.assign(document.createElement('button'),{textContent:'AI設定を開く',className:'text-button',onclick:openSettings}));}
   } catch(error) {toast(`ポストを取り込めませんでした。${error.message}`);}
 }
-receiveCapture(); window.addEventListener('hashchange',receiveCapture);
+startApp(); window.addEventListener('hashchange',()=>{if($('#navigation')) receiveCapture();});

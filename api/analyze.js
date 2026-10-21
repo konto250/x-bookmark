@@ -1,4 +1,4 @@
-import { authenticated, sessionCookie, validAccessCode } from '../server/auth.js';
+import { authenticated } from '../server/auth.js';
 import { inspectPage } from '../server/pages.js';
 import { proposeTags } from '../server/llm.js';
 import { extractUrls, normalizePost, normalizeTags } from '../src/model.js';
@@ -17,6 +17,8 @@ export default async function handler(req, res) {
   res.setHeader('Cache-Control', 'no-store');
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
   const send = (code, body) => {res.statusCode = code; res.end(JSON.stringify(body));};
+  if(!process.env.APP_ACCESS_TOKEN) return send(503,{error:'ログイン設定が未完了です。'});
+  if(!authenticated(req)) return send(401,{error:'ログインが必要です。'});
   if (req.method === 'GET') return send(200, {configured: Boolean(process.env.OPENAI_API_KEY && process.env.APP_ACCESS_TOKEN), authenticated: authenticated(req), provider: 'OpenAI', model: process.env.OPENAI_MODEL || DEFAULT_MODEL, analysisVersion: ANALYSIS_VERSION, accessTokenRequired: true});
   if (req.method !== 'POST') {res.setHeader('Allow','GET, POST'); return send(405,{error:'この操作は対応していません。'});}
   if (!process.env.OPENAI_API_KEY || !process.env.APP_ACCESS_TOKEN) return send(503,{error:'AIタグ提案は設定待ちです。Vercelの環境変数にOPENAI_API_KEYとAPP_ACCESS_TOKENを設定してください。手動タグでの保存は利用できます。'});
@@ -35,12 +37,6 @@ export default async function handler(req, res) {
     }
     if (typeof body === 'string') {if (Buffer.byteLength(body) > 150000) return send(413,{error:'データが大きすぎます。'}); body = JSON.parse(body);}
     if (Buffer.byteLength(JSON.stringify(body)) > 150000) return send(413,{error:'データが大きすぎます。'});
-    if(body?.action === 'authenticate') {
-      if(!validAccessCode(body.accessCode,process.env.APP_ACCESS_TOKEN)) return send(401,{error:'アクセスコードが正しくありません。'});
-      res.setHeader('Set-Cookie',sessionCookie(process.env.APP_ACCESS_TOKEN,process.env.VERCEL === '1' || req.headers['x-forwarded-proto'] === 'https'));
-      return send(200,{authenticated:true});
-    }
-    if(!authenticated(req)) return send(401,{error:'「AI設定」でこのアプリのアクセスコードを入力してください。'});
     let post;
     try {post = normalizePost(body);} catch (error) {return send(400,{error: error.message});}
     const urls = [...new Set([...post.links, ...extractUrls(post.text)])].filter(u => !/^https?:\/\/(www\.)?(x\.com|twitter\.com)\//.test(u));

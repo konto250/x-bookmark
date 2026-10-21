@@ -6,7 +6,7 @@ Xのポストをブックマークレットから取り込み、本文とリン�
 
 ## 使い方
 
-1. アプリの「AI設定」で、管理者が設定したアプリ用アクセスコードを入力します。認証はHttpOnly Cookieで30日間保持します。
+1. ログイン画面で、管理者が設定したパスワード（従来のアプリ用アクセスコード）を入力します。認証はHttpOnly Cookieで30日間保持します。パスワードをlocalStorageには保存しません。
 2. 「ブックマークレットを設定」を開き、「ポストノートに保存」をブラウザーのブックマークバーへドラッグします。
 3. Xで保存したいポストの日時をクリックして詳細ページを開きます。長文は「さらに表示」で展開します。
 4. ブックマークレットを実行すると、アプリの新しいタブに本文が取り込まれます。本文のハッシュタグを自動でタグにし、それ以外の関連タグをAIが追加提案します。AIが利用できなくても、本文のハッシュタグは取り込めます。
@@ -47,13 +47,13 @@ node scripts/setup-local.mjs
 npm run dev
 ```
 
-`http://127.0.0.1:5173` を開きます。`.env.local` の `APP_ACCESS_TOKEN` がアプリの「AI設定」で入力するアクセスコードです。ローカルAPIの環境変数は起動時に読み込むため、変更後はサーバーを再起動します。
+`http://127.0.0.1:5173` を開きます。`.env.local` の `APP_ACCESS_TOKEN` がログイン画面で入力するパスワードです。ローカルAPIの環境変数は起動時に読み込むため、変更後はサーバーを再起動します。認証を含む確認には `npm run dev` を使ってください。`vite preview` 単独ではAPIやサーバー側のアクセス制限を起動しません。
 
 | 環境変数 | 用途 |
 | --- | --- |
 | `OPENAI_API_KEY` | OpenAI APIキー。サーバー側だけで使用 |
 | `OPENAI_MODEL` | モデル名。省略時は `gpt-6-luna` |
-| `APP_ACCESS_TOKEN` | AI利用を制限するアプリ専用の長いランダムなアクセスコード |
+| `APP_ACCESS_TOKEN` | アプリ全体のログイン用パスワード兼Cookie署名用シークレット。32文字以上のランダムな値を使用 |
 
 `.env.local` はGitとVercelへのソースアップロードから除外しています。ブラウザーへ環境変数を展開する `VITE_` 接頭辞は付けません。
 
@@ -73,6 +73,15 @@ npm exec --yes --package=vercel -c "vercel deploy --prod --yes"
 
 ブックマークレットは表示中のアプリのオリジンを使用します。本番用の固定URLで登録してください。デプロイごとのURL・localhost・別のドメインは別の保存領域になります。
 
+## ログインとアクセス制限
+
+- Vercel Routing Middlewareが、未認証の画面・アプリのJavaScript・APIへのアクセスを遮断します。ログイン画面の静的ファイルと `/api/session` のみ公開します。環境変数未設定時はログインを許可しません。認証応答と保護対象は `private, no-store` でキャッシュさせません。
+- パスワードはHTTPS経由でサーバーに送り、Vercelの環境変数 `APP_ACCESS_TOKEN` と照合します。ブラウザーのlocalStorageやsessionStorageにはパスワードを保存しません。署名付きCookieに `HttpOnly; Secure; SameSite=Strict` を付け、30日で期限切れにします。ローカルHTTP環境のみ `Secure` を省きます。
+- Xからの取り込み時に未ログインでも、URLフラグメントの本文はログイン後に引き継ぎます。ログイン済みなら自動で進みます。ログアウトするとCookieを削除し、同じ保存領域の別タブにも画面を閉じる通知を送ります。ブックマークは削除しません。
+- ログイン試行はインスタンス内でIPあたり5回/分に制限します。分散環境全体の厳密な制限ではないため、セットアップが生成する長いランダムなパスワードを使ってください。認証処理ではOpenAIを呼びません。
+- パスワードを変更するには `.env.local` とVercelの `APP_ACCESS_TOKEN` を更新し、再起動・再デプロイします。以前の署名Cookieは無効になります。通常のログアウトはそのブラウザーのCookie削除で、盗まれたCookieの個別失効を管理するDBはありません。
+- この機能は公開アプリへのアクセス制限です。localStorageのブックマークやJSONバックアップを暗号化しません。同じ端末・ブラウザープロファイルを操作できる人からの保護には、OSの画面ロックも必要です。
+
 ## 保存と外部通信
 
 - ブックマークは `localStorage` の `postnote.bookmarks.v1` に保存します。保存するのはポストのURL・本文・投稿者・タグ・リンク先のタイトル等です。ブックマークのサーバーDBはありません。
@@ -88,7 +97,7 @@ npm exec --yes --package=vercel -c "vercel deploy --prod --yes"
 - ログイン必須ページ・PDF・JavaScriptで本文を生成するページ・取得拒否されたページは十分に読めない場合があります。取得できなかったリンクは画面に明示し、利用できる本文だけでタグ提案します。
 - Xのログイン情報・Cookieは取得せず、ブックマークレットがその時点で表示されている本文を読みます。画像・動画の内容は解析しません。
 - XのDOM変更やブラウザーの制限によりブックマークレットが動作しなくなる場合があります。手動入力で保存できます。
-- アクセスコードによる認証と、インスタンス内でIPあたり12回/分の簡易制限があります。この回数制限は分散環境全体の課金上限ではありません。利用予算はOpenAIのプロジェクト側でも管理してください。
+- AI解析にはログイン認証と、インスタンス内でIPあたり12回/分の簡易制限があります。この回数制限は分散環境全体の課金上限ではありません。利用予算はOpenAIのプロジェクト側でも管理してください。
 
 ## 検証
 
@@ -96,18 +105,20 @@ npm exec --yes --package=vercel -c "vercel deploy --prod --yes"
 npm test
 npm run build
 node scripts/check-built-bookmarklet.mjs
-node scripts/smoke.mjs http://127.0.0.1:5173 --llm
+node scripts/smoke.mjs http://127.0.0.1:5173
 ```
 
-単体・DOMテストはOpenAIの応答を模擬して実行します。`smoke.mjs --llm` は `.env.local` のキーで実際のOpenAI APIにテスト文を送信します。
+単体・DOMテストはOpenAIの応答を模擬して実行します。`smoke.mjs` は未認証アクセスの遮断・正しいパスワードでのログイン・Cookie属性・キャッシュからの漏えい防止・ログアウトをHTTPで検証します。`--llm` を追加した場合のみ、`.env.local` のキーで実際のOpenAI APIにテスト文を送信します。
 
-2026-10-21時点で55件の単体・DOMテストと本番ビルドを確認しました。バックアップの全フィールド復元・統合・置き換え・破損ファイル拒否、AI入力上限、キャッシュ期限・再利用・明示的な再解析・失敗後の再試行、本文ハッシュタグとAIタグの併用・重複除去・削除状態の保持、日時がtime要素ではない詳細画面、引用ポスト、固定リンクがない場合の本文選択を含み、本番バンドルから生成したブックマークレットの本文取得も検証しています。初回公開では、本番URLのHTTP 200、アクセスコード認証、TypeScript公式ページの取得、OpenAI実通信を確認し、「TypeScript」「公式ドキュメント」「プログラミング学習」「開発」の提案を受け取りました。実ブラウザーでの表示・X上でのブックマークレット実行は、この作業環境でブラウザーを操作できないため未確認です。
+2026-10-21時点で67件の単体・DOMテストと本番ビルドを確認しました。未認証アクセス拒否・Cookie改ざん拒否・ログアウト・ログイン後の取り込み継続、バックアップの全フィールド復元・統合・置き換え・破損ファイル拒否、AI入力上限、キャッシュ期限・再利用・明示的な再解析・失敗後の再試行、本文ハッシュタグとAIタグの併用・重複除去・削除状態の保持、日時がtime要素ではない詳細画面、引用ポスト、固定リンクがない場合の本文選択を含み、本番バンドルから生成したブックマークレットの本文取得も検証しています。初回公開では、本番URLのHTTP 200、アクセスコード認証、TypeScript公式ページの取得、OpenAI実通信を確認し、「TypeScript」「公式ドキュメント」「プログラミング学習」「開発」の提案を受け取りました。実ブラウザーでの表示・X上でのブックマークレット実行は、この作業環境でブラウザーを操作できないため未確認です。
 
 公開後に主要機能が動かなくなった場合は、VercelのDeploymentsから直前の正常なデプロイへ戻します。ブラウザーに保存したブックマークはデプロイの切り戻しでは削除されません。
 
 ## 参照した公式仕様
 
 - [Vercel上のViteとFunctions](https://vercel.com/docs/frameworks/frontend/vite)
+- [Vercel Routing Middleware](https://vercel.com/docs/routing-middleware/js-reference)
+- [OWASPのWeb Storageと認証情報の扱い](https://cheatsheetseries.owasp.org/cheatsheets/HTML5_Security_Cheat_Sheet.html)
 - [OpenAI Structured Outputs](https://developers.openai.com/api/docs/guides/structured-outputs)
 - [GPT-6 Luna](https://developers.openai.com/api/docs/models/gpt-6-luna)
 - [同一オリジンとWeb Storage](https://developer.mozilla.org/en-US/docs/Web/Security/Defenses/Same-origin_policy)
