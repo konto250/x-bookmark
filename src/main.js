@@ -4,6 +4,7 @@ import { buildBookmarklet } from './bookmarklet.js';
 import { DEFAULT_MODEL } from './analysis-config.js';
 import { createAnalysisCache } from './analysis-cache.js';
 import { createBackup, parseBackup, restoreBackup, MAX_BACKUP_BYTES } from './backup.js';
+import { existingTagsByUsage, preferExistingTags, tagKey } from './tag-policy.js';
 
 const icons = {
   bookmark: '<path d="M6 4h12v17l-6-4-6 4z"/>',
@@ -65,7 +66,7 @@ function renderShell() {
       <p class="fineprint">バックアップと復元はブラウザー内で処理します。AI料金は発生しません。AIの認証情報・下書き・提案キャッシュは含みません。</p><p id="backup-error" class="error-message" role="alert"></p></div><div class="dialog-footer"><span></span><button class="secondary" data-close="backup">閉じる</button></div></dialog>
     <dialog id="editor" aria-labelledby="editor-title"><form id="editor-form"><div class="dialog-header"><div><div class="eyebrow">SAVE A LITTLE INSPIRATION</div><h2 id="editor-title">ポストを保存</h2></div><button type="button" class="icon-button" data-close="editor" aria-label="閉じる">${icon('close')}</button></div>
       <div class="dialog-body"><label class="field">ポストのURL<input id="post-url" type="url" required placeholder="https://x.com/username/status/…" /></label><label class="field">投稿者<input id="post-author" maxlength="160" placeholder="名前・@ユーザー名（任意）" /></label><label class="field">ポストの本文<textarea id="post-text" rows="5" maxlength="30000" placeholder="ポストの本文を入力。ブックマークレットを使うと自動で取り込めます。"></textarea></label>
-      <div class="ai-panel"><div class="section-heading"><span>${icon('spark')}AIでタグを提案</span><button id="analyze" type="button" class="small-button">内容を解析する</button></div><p class="fineprint">本文・本文中のリンク先（最大5件）・既存タグをOpenAIへ送って分類します。</p><p id="analysis-status" class="analysis-status" role="status" aria-live="polite"></p><div id="pages"></div></div>
+      <div class="ai-panel"><div class="section-heading"><span>${icon('spark')}AIでタグを提案</span><button id="analyze" type="button" class="small-button">内容を解析する</button></div><p class="fineprint">既存タグを優先し、必要な場合だけ新しいタグを提案します。本文・リンク先（最大5件）・既存タグをOpenAIへ送ります。</p><p id="analysis-status" class="analysis-status" role="status" aria-live="polite"></p><div id="pages"></div></div>
       <div class="field"><span>タグ <small>本文のハッシュタグ＋AI提案・クリックで外せます</small></span><div id="draft-tags" class="tag-list"></div><div class="tag-input-row"><input id="tag-input" maxlength="40" placeholder="タグを自由に追加" aria-label="追加するタグ" /><button type="button" id="add-tag" class="secondary">${icon('plus')}追加</button></div></div><p id="editor-error" class="error-message" role="alert"></p></div>
       <div class="dialog-footer"><span>${icon('lock')} このブラウザーに保存されます</span><button type="submit" id="save-post" class="primary">${icon('bookmark')}保存する</button></div></form></dialog>
     <dialog id="setup" aria-labelledby="setup-title"><div class="dialog-header"><div><div class="eyebrow">SMALL SETUP, BIG COLLECTION</div><h2 id="setup-title">保存を、もっと手軽に。</h2></div><button class="icon-button" data-close="setup" aria-label="閉じる">${icon('close')}</button></div><div class="dialog-body">
@@ -170,7 +171,7 @@ async function analyzeDraft({force = false} = {}) {
       if(signal.aborted) throw new DOMException('解析を中止しました。','AbortError');
       const cached = !force && key && analysisCache.get(key, post);
       if(cached) return {result:cached, reused:true, ok:true};
-      const response = await fetch('/api/analyze',{method:'POST',headers:{'Content-Type':'application/json'},signal,body:JSON.stringify({...post,existingTags:allTags()})});
+      const response = await fetch('/api/analyze',{method:'POST',headers:{'Content-Type':'application/json'},signal,body:JSON.stringify({...post,existingTags:existingTagsByUsage(state.posts)})});
       if(response.status === 401) {lockApp();throw new DOMException('ログインが必要です。','AbortError');}
       const result = await response.json();
       if(response.ok && key) analysisCache.put(key, result, post);
@@ -185,7 +186,8 @@ async function analyzeDraft({force = false} = {}) {
     if(!current || current.text !== post.text || current.url !== post.url) {$('#analysis-status').textContent = '解析中に本文またはURLが変更されました。変更後の内容で解析してください。'; return;}
     if (result.pages) {draft.pages = normalizePost({...post,pages:result.pages}).pages; renderPages();}
     if(!ok) throw new Error(result.error || 'AIタグ提案を実行できませんでした。');
-    draft.tags = normalizeTags([...draft.tags,...result.tags.filter(t=>!excludedTags.has(t))]);
+    const omitted = new Set([...excludedTags,...extractHashtags(draft.text)].map(tagKey));
+    draft.tags = normalizeTags([...draft.tags,...preferExistingTags(result.tags,existingTagsByUsage(state.posts)).filter(t=>!omitted.has(tagKey(t)))]);
     $('#analysis-status').textContent = `${reused ? '保存済みの提案を再利用しました。API料金は発生しません。リンク先の更新を確認したい場合は再解析できます。' : 'タグを提案しました。同じ内容の結果は30日間再利用します。'}${result.skippedLinks ? ` 最初の5件のリンクを確認しました（残り${result.skippedLinks}件は未確認）。` : ''}`;
     $('#reanalyze').hidden = false;
     renderDraftTags(); persistDraft();

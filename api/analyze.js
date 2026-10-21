@@ -1,8 +1,9 @@
 import { authenticated } from '../server/auth.js';
 import { inspectPage } from '../server/pages.js';
 import { proposeTags } from '../server/llm.js';
-import { extractUrls, normalizePost, normalizeTags } from '../src/model.js';
+import { extractUrls, normalizePost } from '../src/model.js';
 import { DEFAULT_MODEL, ANALYSIS_VERSION } from '../src/analysis-config.js';
+import { normalizeTagCatalog } from '../src/tag-policy.js';
 
 const buckets = new Map();
 function allowRequest(ip) {
@@ -42,7 +43,7 @@ export default async function handler(req, res) {
     const urls = [...new Set([...post.links, ...extractUrls(post.text)])].filter(u => !/^https?:\/\/(www\.)?(x\.com|twitter\.com)\//.test(u));
     const pages = await Promise.all(urls.slice(0,5).map(inspectPage));
     try {
-      const result = await proposeTags({text: post.text, pages, existingTags: normalizeTags(body.existingTags)});
+      const result = await proposeTags({text: post.text, pages, existingTags: normalizeTagCatalog(body.existingTags)});
       return send(200,{...result, pages: pages.map(({text, ...p}) => p), skippedLinks: Math.max(0,urls.length-5)});
     } catch (error) {
       return send(502,{error: error.name === 'TimeoutError' ? 'AIの応答が時間内に返りませんでした。再試行してください。' : error.message, pages: pages.map(({text,...p})=>p)});

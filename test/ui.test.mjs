@@ -8,6 +8,7 @@ import { webcrypto } from 'node:crypto';
 import { createAnalysisCache, ANALYSIS_CACHE_KEY } from '../src/analysis-cache.js';
 import { DEFAULT_MODEL } from '../src/analysis-config.js';
 import * as backup from '../src/backup.js';
+import * as tagPolicy from '../src/tag-policy.js';
 
 const source=readFileSync(new URL('../src/main.js',import.meta.url),'utf8').replace(/^import .*;\r?\n/gm,'');
 const tick=()=>new Promise(resolve=>setTimeout(resolve,10));
@@ -18,6 +19,7 @@ async function app({posts=[],capture,configured=false,analyze,cache,authenticate
   Object.assign(w,model,{readPosts:()=>model.readPosts(w.localStorage),upsertPosts:incoming=>model.upsertPosts(incoming,w.localStorage),buildBookmarklet});
   Object.assign(w,{DEFAULT_MODEL,createAnalysisCache:options=>createAnalysisCache({...options,crypto:webcrypto})});
   Object.assign(w,backup,{restoreBackup:(posts,mode)=>backup.restoreBackup(posts,mode,w.localStorage)});
+  Object.assign(w,tagPolicy);
   if(cache) w.localStorage.setItem(ANALYSIS_CACHE_KEY,cache);
   w.HTMLDialogElement.prototype.showModal=function(){this.open=true;};
   w.HTMLDialogElement.prototype.close=function(){this.open=false;this.dispatchEvent(new w.Event('close'));};
@@ -32,6 +34,12 @@ async function app({posts=[],capture,configured=false,analyze,cache,authenticate
   return {dom,w,$,click,fill,submit};
 }
 const post=(id,text,tags)=>model.normalizePost({url:`https://x.com/test/status/${id}`,text,tags,author:'テスト\n@test'});
+
+test('既存タグを使用頻度順で送り、キャッシュの提案も既存の表記に寄せる',async()=>{
+  let calls=0;
+  const a=await app({posts:[post(1,'Reactの記事',['React']),post(2,'Reactの別記事',['React','学習'])],capture:{url:'https://x.com/test/status/3',text:'Reactの入門'},configured:true,analyze:async init=>{calls++;assert.equal(JSON.parse(init.body).existingTags[0],'React');return {ok:true,json:async()=>({tags:['react','新しい主題'],pages:[]})};}});
+  try {await tick();assert.ok(a.$('[data-remove-tag="React"]'));assert.equal(a.$('[data-remove-tag="react"]'),null);assert.ok(a.$('[data-remove-tag="新しい主題"]'));a.click('[data-remove-tag="React"]');a.click('#analyze');await tick();assert.equal(calls,1);assert.equal(a.$('[data-remove-tag="React"]'),null);}finally{a.dom.window.close();}
+});
 
 test('未ログイン時は保存済み本文やバックアップ操作を表示しない',async()=>{
   const original=post(1,'非公開の本文',['個人用']);const a=await app({posts:[original],authenticated:false});

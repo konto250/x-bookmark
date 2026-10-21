@@ -50,7 +50,7 @@ test('AI入力を制限し、推論と説明文生成を省いてタグだけを
   const input=JSON.parse(sent.input);
   assert.equal(input.post.length,INPUT_LIMITS.post);assert.equal(input.pages.length,5);
   for(const page of input.pages) {assert.ok(page.text.length<=1000);assert.ok(page.title.length<=160);assert.ok(page.description.length<=240);assert.ok(page.url.length<=500);}
-  assert.deepEqual(input.hashtags,['末尾タグ']);assert.equal(input.existingTags.length,20);
+  assert.deepEqual(input.hashtags,['末尾タグ']);assert.equal(input.existingTags.length,30);
   assert.equal(sent.max_output_tokens,256);assert.deepEqual(sent.reasoning,{effort:'none'});
   assert.deepEqual(sent.text.format.schema.required,['tags']);assert.equal(sent.text.format.schema.properties.summary,undefined);
 });
