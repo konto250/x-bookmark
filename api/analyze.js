@@ -2,6 +2,7 @@ import { authenticated, sessionCookie, validAccessCode } from '../server/auth.js
 import { inspectPage } from '../server/pages.js';
 import { proposeTags } from '../server/llm.js';
 import { extractUrls, normalizePost, normalizeTags } from '../src/model.js';
+import { DEFAULT_MODEL, ANALYSIS_VERSION } from '../src/analysis-config.js';
 
 const buckets = new Map();
 function allowRequest(ip) {
@@ -16,7 +17,7 @@ export default async function handler(req, res) {
   res.setHeader('Cache-Control', 'no-store');
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
   const send = (code, body) => {res.statusCode = code; res.end(JSON.stringify(body));};
-  if (req.method === 'GET') return send(200, {configured: Boolean(process.env.OPENAI_API_KEY && process.env.APP_ACCESS_TOKEN), authenticated: authenticated(req), provider: 'OpenAI', model: process.env.OPENAI_MODEL || 'gpt-4.1-mini', accessTokenRequired: true});
+  if (req.method === 'GET') return send(200, {configured: Boolean(process.env.OPENAI_API_KEY && process.env.APP_ACCESS_TOKEN), authenticated: authenticated(req), provider: 'OpenAI', model: process.env.OPENAI_MODEL || DEFAULT_MODEL, analysisVersion: ANALYSIS_VERSION, accessTokenRequired: true});
   if (req.method !== 'POST') {res.setHeader('Allow','GET, POST'); return send(405,{error:'この操作は対応していません。'});}
   if (!process.env.OPENAI_API_KEY || !process.env.APP_ACCESS_TOKEN) return send(503,{error:'AIタグ提案は設定待ちです。Vercelの環境変数にOPENAI_API_KEYとAPP_ACCESS_TOKENを設定してください。手動タグでの保存は利用できます。'});
   const origin = req.headers.origin;

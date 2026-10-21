@@ -1,6 +1,8 @@
 import './style.css';
 import { STORAGE_KEY, DRAFT_KEY, normalizePost, normalizeTags, extractHashtags, readPosts, upsertPosts } from './model.js';
 import { buildBookmarklet } from './bookmarklet.js';
+import { DEFAULT_MODEL } from './analysis-config.js';
+import { createAnalysisCache } from './analysis-cache.js';
 
 const icons = {
   bookmark: '<path d="M6 4h12v17l-6-4-6 4z"/>',
@@ -26,6 +28,7 @@ const $ = s => document.querySelector(s);
 const state = {posts: [], filter: null, search: '', grouped: false, sort: 'new', error: '', config: null};
 let draft = null, excludedTags = new Set(), analyzing = false, controller = null;
 let toastTimer;
+const analysisCache = createAnalysisCache({storage: () => localStorage, crypto: window.crypto});
 function toast(message) {$('#toast').textContent = message; $('#toast').classList.add('visible'); clearTimeout(toastTimer); toastTimer = setTimeout(()=>$('#toast').classList.remove('visible'),4500);}
 function loadPosts() {try {state.posts = readPosts(); state.error = '';} catch {state.error = '保存データを読み取れませんでした。ブラウザーの保存設定をご確認ください。既存データは上書きしません。';}}
 const allTags = () => [...new Set(state.posts.flatMap(p => p.tags))].sort((a,b)=>a.localeCompare(b,'ja'));
@@ -62,14 +65,17 @@ function renderShell() {
       <details><summary>ドラッグできない場合・スマートフォン</summary><p>ボタンからコードをコピーし、ブラウザーのブックマーク編集画面でURL欄に貼り付けてください。先頭の「javascript:」が残っていることを確認します。実行できない環境では「ポストを追加」からURLと本文を入力できます。</p><button class="secondary" data-action="copy-bookmarklet">コードをコピー</button><textarea id="bookmarklet-code" readonly aria-label="ブックマークレットのコード"></textarea></details>
       <div class="note">本文を取得できない場合は、この画面からブックマークレットを登録し直してください。登録済みのコードは自動更新されません。</div><div class="note">ブックマークはブラウザー・端末・サイトのURLごとに保存されます。データを消す前や別の端末へ移すときは、右上の書き出しボタンでバックアップしてください。</div>
     </div><div class="dialog-footer"><span></span><button class="primary" data-close="setup">はじめる ${icon('arrow')}</button></div></dialog>
-    <dialog id="settings" aria-labelledby="settings-title"><form id="settings-form"><div class="dialog-header"><h2 id="settings-title">AIタグ提案の設定</h2><button type="button" class="icon-button" data-close="settings" aria-label="閉じる">${icon('close')}</button></div><div class="dialog-body"><div id="config-status" class="note"></div><label class="field">アプリのアクセスコード<input id="access-code" type="password" autocomplete="off" placeholder="管理者が設定したコード" /></label><p class="fineprint">OpenAIのAPIキーではありません。一度入力すると、このブラウザーで30日間AIタグ提案を利用できます。</p><p id="settings-error" class="error-message" role="alert"></p><details><summary>管理者向け：OpenAI APIの設定方法</summary><p>Vercelのプロジェクト設定で環境変数 <code>OPENAI_API_KEY</code> と、このアプリ専用の長いランダムな <code>APP_ACCESS_TOKEN</code> を設定し、再デプロイしてください。<code>OPENAI_MODEL</code> でモデルを指定できます（初期値：gpt-4.1-mini）。</p><p>ChatGPTのログインやサブスクリプションではなく、OpenAI APIのキーが必要です。</p></details></div><div class="dialog-footer"><span>OpenAI API</span><button class="primary" type="submit">設定を保存</button></div></form></dialog>`;
+    <dialog id="settings" aria-labelledby="settings-title"><form id="settings-form"><div class="dialog-header"><h2 id="settings-title">AIタグ提案の設定</h2><button type="button" class="icon-button" data-close="settings" aria-label="閉じる">${icon('close')}</button></div><div class="dialog-body"><div id="config-status" class="note"></div><label class="field">アプリのアクセスコード<input id="access-code" type="password" autocomplete="off" placeholder="管理者が設定したコード" /></label><p class="fineprint">OpenAIのAPIキーではありません。一度入力すると、このブラウザーで30日間AIタグ提案を利用できます。</p><p id="settings-error" class="error-message" role="alert"></p><details><summary>管理者向け：OpenAI APIの設定方法</summary><p>Vercelのプロジェクト設定で環境変数 <code>OPENAI_API_KEY</code> と、このアプリ専用の長いランダムな <code>APP_ACCESS_TOKEN</code> を設定し、再デプロイしてください。<code>OPENAI_MODEL</code> でモデルを指定できます（初期値：gpt-6-luna）。</p><p>ChatGPTのログインやサブスクリプションではなく、OpenAI APIのキーが必要です。</p></details></div><div class="dialog-footer"><span>OpenAI API</span><button class="primary" type="submit">設定を保存</button></div></form></dialog>`;
   $('#bookmarklet').setAttribute('href', buildBookmarklet(location.origin));
   $('#bookmarklet-code').value = buildBookmarklet(location.origin);
   $('#bookmarklet').addEventListener('click', event => {event.preventDefault(); toast('このボタンをブックマークバーへドラッグしてください。');});
   $('#search').addEventListener('input', event => {state.search = event.target.value; renderCollection();});
   $('#sort').addEventListener('change', event => {state.sort = event.target.value; renderCollection();});
   $('#group-button').addEventListener('click', ()=>{state.grouped = !state.grouped; renderCollection();});
-  $('#analyze').addEventListener('click', analyzeDraft);
+  $('#analyze').addEventListener('click', () => analyzeDraft());
+  const refresh = Object.assign(document.createElement('button'), {id:'reanalyze', type:'button', className:'text-button', textContent:'再解析（API使用）', hidden:true});
+  refresh.addEventListener('click', () => analyzeDraft({force:true}));
+  $('#analyze').after(refresh);
   $('#add-tag').addEventListener('click', addTag);
   $('#tag-input').addEventListener('keydown', event=>{if(event.key === 'Enter'){event.preventDefault(); addTag();}});
   $('#editor-form').addEventListener('submit', saveDraft);
@@ -123,6 +129,7 @@ function openEditor(input = {}, edit = false) {
   $('#post-url').value = draft.url; $('#post-url').readOnly = edit;
   $('#post-author').value = draft.author; $('#post-text').value = draft.text;
   $('#analysis-status').textContent = ''; $('#editor-error').textContent = '';
+  $('#reanalyze').hidden = true;
   $('#tag-input').value = ''; setAnalyzing(false); applyHashtags(); renderPages();
   if (!$('#editor').open) $('#editor').showModal();
   persistDraft();
@@ -137,21 +144,38 @@ function persistDraft() {syncDraft(); try {if(draft) sessionStorage.setItem(DRAF
 function renderDraftTags() {$('#draft-tags').innerHTML = draft.tags.map(t=>tagChip(t,true)).join('') || '<span class="no-tag">AIの提案を使うか、好きなタグを追加してください。</span>';}
 function renderPages() {$('#pages').innerHTML = draft.pages.map(p=>`<div class="page-result ${p.status === 'ok' ? '' : 'failed'}">${icon(p.status === 'ok' ? 'check' : 'link')}<div><a href="${esc(p.url)}" target="_blank" rel="noopener noreferrer">${esc(p.title || new URL(p.url).hostname)}</a><small>${p.status === 'ok' ? 'リンク先の内容を取得済み' : esc(p.error || '取得できませんでした。')}</small></div></div>`).join('');}
 function addTag() {const value = $('#tag-input').value; if(!value.trim()) return; draft.tags = normalizeTags([...draft.tags,value]); excludedTags.delete(value.trim().replace(/^[#＃]+/,'')); $('#tag-input').value = ''; renderDraftTags(); persistDraft(); $('#tag-input').focus();}
-function setAnalyzing(value) {analyzing = value; $('#analyze').disabled = value; $('#analyze').textContent = value ? '解析中…' : '内容を解析する'; $('#save-post').disabled = value;}
-async function analyzeDraft() {
+function setAnalyzing(value) {analyzing = value; $('#analyze').disabled = value; $('#reanalyze').disabled = value; $('#analyze').textContent = value ? '解析中…' : '内容を解析する'; $('#save-post').disabled = value;}
+async function analyzeDraft({force = false} = {}) {
   if (analyzing || !draft) return;
   syncDraft(); applyHashtags(); let post;
   try {post = normalizePost(draft);} catch (error) {$('#editor-error').textContent = error.message; return;}
   $('#editor-error').textContent = ''; $('#analysis-status').textContent = '本文とリンク先を確認して、AIがタグを考えています…';
   setAnalyzing(true); controller = new AbortController(); const active = draft;
+  const signal = controller.signal;
   try {
-    const response = await fetch('/api/analyze',{method:'POST',headers:{'Content-Type':'application/json'},signal:controller.signal,body:JSON.stringify({...post,existingTags:allTags()})});
-    const result = await response.json();
+    let key = null;
+    try {key = await analysisCache.key(post, state.config?.model || DEFAULT_MODEL, state.config?.analysisVersion);} catch { /* 保存機能が使えなくても解析は続行する。 */ }
+    const obtain = async () => {
+      if(signal.aborted) throw new DOMException('解析を中止しました。','AbortError');
+      const cached = !force && key && analysisCache.get(key, post);
+      if(cached) return {result:cached, reused:true, ok:true};
+      const response = await fetch('/api/analyze',{method:'POST',headers:{'Content-Type':'application/json'},signal,body:JSON.stringify({...post,existingTags:allTags()})});
+      const result = await response.json();
+      if(response.ok && key) analysisCache.put(key, result, post);
+      return {result, reused:false, ok:response.ok};
+    };
+    // 対応ブラウザーでは別タブの同時解析も待ち合わせ、保存済みの結果を使う。
+    const {result, reused, ok} = key && navigator.locks ? await navigator.locks.request('postnote-analysis-'+key, {signal}, obtain) : await obtain();
     if(draft !== active) return;
+    syncDraft();
+    let current;
+    try {current = normalizePost(draft);} catch {}
+    if(!current || current.text !== post.text || current.url !== post.url) {$('#analysis-status').textContent = '解析中に本文またはURLが変更されました。変更後の内容で解析してください。'; return;}
     if (result.pages) {draft.pages = normalizePost({...post,pages:result.pages}).pages; renderPages();}
-    if(!response.ok) throw new Error(result.error || 'AIタグ提案を実行できませんでした。');
+    if(!ok) throw new Error(result.error || 'AIタグ提案を実行できませんでした。');
     draft.tags = normalizeTags([...draft.tags,...result.tags.filter(t=>!excludedTags.has(t))]);
-    $('#analysis-status').textContent = `${result.summary || 'タグを提案しました。'}${result.skippedLinks ? ` 最初の5件のリンクを確認しました（残り${result.skippedLinks}件は未確認）。` : ''}`;
+    $('#analysis-status').textContent = `${reused ? '保存済みの提案を再利用しました。API料金は発生しません。リンク先の更新を確認したい場合は再解析できます。' : 'タグを提案しました。同じ内容の結果は30日間再利用します。'}${result.skippedLinks ? ` 最初の5件のリンクを確認しました（残り${result.skippedLinks}件は未確認）。` : ''}`;
+    $('#reanalyze').hidden = false;
     renderDraftTags(); persistDraft();
   } catch (error) {if(error.name !== 'AbortError' && draft === active) {$('#analysis-status').textContent = error.message || '通信に失敗しました。'; $('#analysis-status').append(Object.assign(document.createElement('button'),{textContent:'AI設定を開く',className:'text-button',onclick:openSettings}));}}
   finally {if(draft === active) setAnalyzing(false);}

@@ -4,14 +4,19 @@ import { readFileSync } from 'node:fs';
 import { JSDOM } from 'jsdom';
 import * as model from '../src/model.js';
 import { buildBookmarklet } from '../src/bookmarklet.js';
+import { webcrypto } from 'node:crypto';
+import { createAnalysisCache, ANALYSIS_CACHE_KEY } from '../src/analysis-cache.js';
+import { DEFAULT_MODEL } from '../src/analysis-config.js';
 
 const source=readFileSync(new URL('../src/main.js',import.meta.url),'utf8').replace(/^import .*;\r?\n/gm,'');
 const tick=()=>new Promise(resolve=>setTimeout(resolve,10));
-async function app({posts=[],capture,configured=false,analyze}={}) {
+async function app({posts=[],capture,configured=false,analyze,cache}={}) {
   const url='https://postnote.test/'+(capture?'#capture='+encodeURIComponent(JSON.stringify(capture)):'');
   const dom=new JSDOM('<div id="app"></div><div id="toast"></div>',{url,runScripts:'outside-only',pretendToBeVisual:true});
   const w=dom.window;
   Object.assign(w,model,{readPosts:()=>model.readPosts(w.localStorage),upsertPosts:incoming=>model.upsertPosts(incoming,w.localStorage),buildBookmarklet});
+  Object.assign(w,{DEFAULT_MODEL,createAnalysisCache:options=>createAnalysisCache({...options,crypto:webcrypto})});
+  if(cache) w.localStorage.setItem(ANALYSIS_CACHE_KEY,cache);
   w.HTMLDialogElement.prototype.showModal=function(){this.open=true;};
   w.HTMLDialogElement.prototype.close=function(){this.open=false;this.dispatchEvent(new w.Event('close'));};
   w.confirm=()=>true;
@@ -25,6 +30,30 @@ async function app({posts=[],capture,configured=false,analyze}={}) {
   return {dom,w,$,click,fill,submit};
 }
 const post=(id,text,tags)=>model.normalizePost({url:`https://x.com/test/status/${id}`,text,tags,author:'テスト\n@test'});
+
+test('同じ内容はAPIを再呼び出しせず、再取り込みでも削除タグを戻さない。明示的な再解析と本文変更時はAPIを呼ぶ',async()=>{
+  let calls=0;
+  const capture={url:'https://x.com/test/status/123',text:'型を学ぶ #TypeScript'};
+  const analyze=async()=>{calls++;return {ok:true,json:async()=>({tags:['学習','開発'],pages:[]})};};
+  const a=await app({capture,configured:true,analyze});
+  try {
+    await tick();assert.equal(calls,1);
+    a.click('[data-remove-tag="学習"]');a.click('#analyze');await tick();
+    assert.equal(calls,1);assert.match(a.$('#analysis-status').textContent,/再利用/);assert.equal(a.$('[data-remove-tag="学習"]'),null);
+    a.submit();
+    const b=await app({capture,configured:true,analyze,posts:model.readPosts(a.w.localStorage),cache:a.w.localStorage.getItem(ANALYSIS_CACHE_KEY)});
+    try {
+      await tick();assert.equal(calls,1);assert.equal(b.$('[data-remove-tag="学習"]'),null);assert.ok(b.$('[data-remove-tag="TypeScript"]'));
+      b.click('#reanalyze');await tick();assert.equal(calls,2);
+      b.fill('#post-text','変更した内容 #TypeScript');b.click('#analyze');await tick();assert.equal(calls,3);
+    } finally {b.dom.window.close();}
+  } finally {a.dom.window.close();}
+});
+test('AI失敗はキャッシュせず、次の操作で再試行する',async()=>{
+  let calls=0;
+  const a=await app({capture:{url:'https://x.com/test/status/123',text:'本文'},configured:true,analyze:async()=>{calls++;return calls===1?{ok:false,json:async()=>({error:'通信エラー'})}:{ok:true,json:async()=>({tags:[],pages:[]})};}});
+  try {await tick();assert.equal(calls,1);a.click('#analyze');await tick();assert.equal(calls,2);a.click('#analyze');await tick();assert.equal(calls,2);} finally {a.dom.window.close();}
+});
 
 test('空の一覧から手動保存、タグ追加、再読み込み、元ポストへのリンク',async()=>{
   const a=await app();try {
