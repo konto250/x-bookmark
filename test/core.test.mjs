@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
+import { JSDOM } from 'jsdom';
 import { postUrl, normalizePost, normalizeTags, readPosts, upsertPosts, extractUrls, STORAGE_KEY } from '../src/model.js';
 import { isPublicAddress, validateTarget, parsePage } from '../server/pages.js';
 import { proposeTags } from '../server/llm.js';
@@ -31,13 +32,22 @@ test('LLMへ本文と取得済みページだけを送り構造化されたタ�
 test('OpenAIの利用上限や不正な応答を成功扱いしない',async()=>{await assert.rejects(proposeTags({text:'',pages:[],existingTags:[]},{apiKey:'test-key',fetcher:async()=>({ok:false,status:429})}),/利用上限/);await assert.rejects(proposeTags({text:'',pages:[],existingTags:[]},{apiKey:'test-key',fetcher:async()=>({ok:true,json:async()=>({status:'incomplete'})})}),/完了できません/);});
 test('認証Cookieの改ざん・期限切れ・秘密鍵変更を拒否する',()=>{const now=1700000000000;const cookie=sessionCookie('secret',true,now);assert.match(cookie,/HttpOnly; SameSite=Strict/);assert.match(cookie,/Secure/);const req={headers:{cookie}};assert.equal(authenticated(req,'secret',now),true);assert.equal(authenticated(req,'other',now),false);assert.equal(authenticated(req,'secret',now+31*86400000),false);assert.equal(authenticated({headers:{cookie:cookie.replace(/\.[a-f0-9]+;/,'.bad;')}},'secret',now),false);assert.equal(validAccessCode('secret','secret'),true);assert.equal(validAccessCode('wrong','secret'),false);});
 test('ブックマークレットは詳細のポストを選択してURLフラグメントで送る',()=>{
-  let opened; const author={innerText:'テスト\n@test'}; const body={innerText:'本文',querySelectorAll:()=>[{getAttribute:()=>null,href:'https://example.com'}]};
-  const article=id=>({querySelector:s=>s==='time'?{closest:()=>({getAttribute:()=>`/test/status/${id}`})}:s==='[data-testid="tweetText"]'?body:s==='[data-testid="User-Name"]'?author:null});
-  const context={location:{hostname:'x.com',pathname:'/test/status/123',origin:'https://x.com'},document:{querySelectorAll:()=>[article('999'),article('123')]},window:{open:(...args)=>opened=args},alert:()=>assert.fail('警告は不要')};
-  vm.runInNewContext(buildBookmarklet('https://app.example').slice(11),context);
-  const url=new URL(opened[0]);assert.equal(url.origin,'https://app.example');assert.equal(url.search,'');const payload=JSON.parse(decodeURIComponent(url.hash.slice(9)));assert.equal(payload.url,'https://x.com/test/status/123');assert.equal(payload.text,'本文');assert.equal(opened[2],'noopener,noreferrer');
+  const dom=new JSDOM('<article data-testid="tweet"><a href="/test/status/999"><time>昨日</time></a><div data-testid="tweetText">別の本文</div></article><article data-testid="tweet"><div data-testid="User-Name">テスト</div><a href="/test/status/123"><time>今日</time></a><div data-testid="tweetText">本文</div></article>',{url:'https://x.com/test/status/123',runScripts:'outside-only'});
+  let opened;dom.window.open=(...args)=>opened=args;dom.window.alert=()=>assert.fail('警告は不要');
+  try {dom.window.eval(buildBookmarklet('https://app.example').slice(11));const url=new URL(opened[0]);assert.equal(url.origin,'https://app.example');assert.equal(url.search,'');const payload=JSON.parse(decodeURIComponent(url.hash.slice(9)));assert.equal(payload.url,'https://x.com/test/status/123');assert.equal(payload.text,'本文');assert.equal(opened[2],'noopener,noreferrer');}finally{dom.window.close();}
 });
 test('ブックマークレットはタイムラインを誤って保存しない',()=>{let alertShown=false;vm.runInNewContext(buildBookmarklet('https://app.example').slice(11),{location:{hostname:'x.com',pathname:'/home'},alert:()=>alertShown=true});assert.equal(alertShown,true);});
+test('日時がtime要素ではない詳細ポストでも本文を取得する',()=>{
+  const dom = new JSDOM('<article data-testid="tweet"><div data-testid="User-Name">投稿者</div><div data-testid="tweetText">詳細ページの本文</div><a href="/test/status/123">午後3:00 · 2026年10月21日</a></article><article data-testid="tweet"><a href="/reply/status/999"><time>1分</time></a><div data-testid="tweetText">返信の本文</div></article>', {url:'https://x.com/test/status/123',runScripts:'outside-only'});
+  let opened, warning;
+  dom.window.open=(...args)=>opened=args;dom.window.alert=message=>warning=message;
+  try {
+    dom.window.eval(buildBookmarklet('https://app.example').slice(11));
+    assert.ok(opened,warning || '保存画面が開くこと');
+    const payload=JSON.parse(decodeURIComponent(new URL(opened[0]).hash.slice(9)));
+    assert.equal(payload.text,'詳細ページの本文');
+  } finally {dom.window.close();}
+});
 test('API未設定・未認証・不正な送信元を適切に拒否する',async()=>{
   const priorKey=process.env.OPENAI_API_KEY,priorToken=process.env.APP_ACCESS_TOKEN;
   const run=async(req)=>{let body;const res={setHeader(){},end(data){body=JSON.parse(data);},statusCode:200};await handler({method:'POST',headers:{host:'app.example','content-type':'application/json'},body:fixture,...req},res);return {code:res.statusCode,body};};
